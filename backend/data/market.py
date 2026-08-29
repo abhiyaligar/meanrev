@@ -377,6 +377,92 @@ def fetch_ohlcv(
         except Exception:
             pass
 
+        # Handle empty for crypto cross like BTC/ETH via derived BTC/USD / ETH/USD
+        if df.empty and is_crypto and "/" in sym:
+            base, quote = sym.split("/", 1)
+            # Try to derive cross via USD (e.g., BTC/ETH = BTC/USD / ETH/USD)
+            if quote != "USD" and base != "USD":
+                # Cross like BTC/ETH
+                try:
+                    # Fetch USD legs without recursion loop (direct, no derived fallback to avoid infinite)
+                    # Use cache-aware direct fetch for USD pairs
+                    df_base_usd = None
+                    df_quote_usd = None
+                    # Try BTC/USD and ETH/USD
+                    for leg, target_df in [(f"{base}/USD", "base_usd"), (f"{quote}/USD", "quote_usd")]:
+                        # Avoid infinite recursion: call internal fetch without cross-derive for USD legs
+                        # Use a simple direct fetch via _get_crypto_client bypassing this cross logic
+                        try:
+                            # Direct fetch for USD pair
+                            leg_key = _cache_key(leg, timeframe, lim)
+                            leg_cached = _get_cached(leg_key)
+                            if leg_cached is not None and not leg_cached.empty:
+                                if target_df == "base_usd":
+                                    df_base_usd = leg_cached
+                                else:
+                                    df_quote_usd = leg_cached
+                            else:
+                                # Try live fetch for USD leg (will not recurse to cross since quote is USD)
+                                # Use a helper to fetch without cross-derive: temporarily set is_crypto but not cross
+                                from alpaca.data.requests import CryptoBarsRequest
+
+                                c_client = _get_crypto_client()
+                                if c_client:
+                                    tf2 = _timeframe_to_alpaca(timeframe)
+                                    req2 = CryptoBarsRequest(symbol_or_symbols=leg, timeframe=tf2, limit=lim)
+                                    import concurrent.futures
+
+                                    def _do2():
+                                        return c_client.get_crypto_bars(req2)
+
+                                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex2:
+                                        resp2 = ex2.submit(_do2).result(timeout=15)
+                                        # Normalize similarly (simplified)
+                                        df2 = None
+                                        if hasattr(resp2, "df") and isinstance(resp2.df, pd.DataFrame):
+                                            try:
+                                                df2 = resp2.df.xs(leg, level=0) if "symbol" in str(resp2.df.index.names) else resp2.df
+                                            except Exception:
+                                                df2 = resp2.df
+                                        if df2 is not None and not df2.empty:
+                                            df2.columns = [c.lower() for c in df2.columns]
+                                            if target_df == "base_usd":
+                                                df_base_usd = df2
+                                            else:
+                                                df_quote_usd = df2
+                        except Exception:
+                            pass
+                    if df_base_usd is not None and df_quote_usd is not None and not df_base_usd.empty and not df_quote_usd.empty:
+                        # Align on index and derive
+                        try:
+                            # Use last closes
+                            base_close = float(df_base_usd["close"].iloc[-1])
+                            quote_close = float(df_quote_usd["close"].iloc[-1])
+                            if quote_close != 0:
+                                derived_close = base_close / quote_close
+                                # Build synthetic df from base_usd structure but with derived close
+                                df = df_base_usd.copy()
+                                # Derive OHLC as ratio
+                                # Use base_usd OHLC / quote_usd close (approx)
+                                df["close"] = derived_close
+                                df["open"] = float(df_base_usd["open"].iloc[-1]) / quote_close if "open" in df_base_usd.columns else derived_close
+                                df["high"] = float(df_base_usd["high"].iloc[-1]) / quote_close if "high" in df_base_usd.columns else derived_close
+                                df["low"] = float(df_base_usd["low"].iloc[-1]) / quote_close if "low" in df_base_usd.columns else derived_close
+                                df["volume"] = df_base_usd["volume"] if "volume" in df_base_usd.columns else 0
+                                df = _compute_vwap(df)
+                                df = _add_indicators(df)
+                                try:
+                                    df = df.sort_index()
+                                except Exception:
+                                    pass
+                                _set_cached(key, df)
+                                log_event("market_data_derived_cross", symbol=sym, via=[f"{base}/USD", f"{quote}/USD"], derived_close=derived_close)
+                                return df
+                        except Exception as e2:
+                            log_event("market_data_derive_failed", level="warning", symbol=sym, error=str(e2)[:200])
+                except Exception:
+                    pass
+
         _set_cached(key, df)
         log_event("market_data_fetch_ok", symbol=sym, timeframe=timeframe, rows=len(df))
         return df
