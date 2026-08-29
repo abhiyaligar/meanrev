@@ -26,6 +26,7 @@ from alpaca.trading.enums import QueryOrderStatus
 
 from backend.broker.rate_limit import MAX_RETRIES, RateLimitExceeded, bucket, is_retryable_exception
 from backend.core.config import get_settings
+from backend.core.utils import clamp_limit, normalize_symbol
 
 
 class AlpacaConnectionError(Exception):
@@ -135,8 +136,8 @@ def get_positions(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     Symbol is normalized to upper-case per VULN 6 fix.
     """
 
-    # Normalize symbol to upper-case, stripped
-    norm_symbol = symbol.strip().upper() if symbol and symbol.strip() else None
+    # Single source via core/utils
+    norm_symbol = normalize_symbol(symbol)
 
     def _do():
         client = _create_trading_client()
@@ -171,14 +172,7 @@ def get_orders(
 
     def _do():
         client = _create_trading_client()
-        # Clamp limit — explicit guard for limit<1 per VULN 7
-        try:
-            lim_raw = int(limit)
-        except (TypeError, ValueError):
-            lim_raw = 50
-        if lim_raw < 1:
-            lim_raw = 1
-        lim = min(lim_raw, 500)
+        lim = clamp_limit(limit, default=50, min_val=1, max_val=500)
         # Map status
         status_map = {
             "open": QueryOrderStatus.OPEN,

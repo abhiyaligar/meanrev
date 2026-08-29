@@ -11,20 +11,11 @@ Docs: https://docs.langchain.com/oss/python/langchain/tools#basic-tool-definitio
 from pathlib import Path
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolCallLimitMiddleware, wrap_tool_call
-from langchain.messages import ToolMessage
+from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain.tools import tool
 
-from backend.core.config import get_settings
 from backend.core.system_prompt import REPORTING_SYSTEM_PROMPT
-
-
-@wrap_tool_call
-def _handle_tool_errors(request, handler):
-    try:
-        return handler(request)
-    except Exception as e:
-        return ToolMessage(content=f"Tool error: Please check input and try again. ({str(e)})", tool_call_id=request.tool_call["id"])
+from backend.core.utils import get_model_id, handle_tool_errors
 
 
 @tool
@@ -47,15 +38,7 @@ def read_logs(lines: int = 50) -> str:
 
 
 def _model_id() -> str:
-    try:
-        s = get_settings()
-        provider = s.llm_provider
-        model = s.get_model("reporting")
-        if ":" in model and model.split(":")[0] in ("openrouter", "groq", "modal", "openai", "anthropic", "google_genai"):
-            return model
-        return model if provider == "modal" else f"{provider}:{model}"
-    except Exception as e:
-        return f"missing:{str(e)[:60]}"
+    return get_model_id("reporting")
 
 
 def get_reporting_agent():
@@ -66,7 +49,7 @@ def get_reporting_agent():
         model=_model_id(),
         tools=[read_logs],
         system_prompt=REPORTING_SYSTEM_PROMPT,
-        middleware=[ToolCallLimitMiddleware(thread_limit=10, run_limit=5), _handle_tool_errors],
+        middleware=[ToolCallLimitMiddleware(thread_limit=10, run_limit=5), handle_tool_errors],
     )
 
 

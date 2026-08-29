@@ -19,18 +19,11 @@ from typing import Any, Dict
 from backend.core.config import get_settings
 from backend.core.logging import log_event
 from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, GRAPH_STRATEGY_PROMPT_TEMPLATE
+from backend.core.utils import get_model_id
 
 
 def _model_id(agent: str) -> str:
-    try:
-        s = get_settings()
-        provider = s.llm_provider
-        model = s.get_model(agent)
-        if ":" in model and model.split(":")[0] in ("openrouter", "groq", "modal", "openai", "anthropic", "google_genai"):
-            return model
-        return model if provider == "modal" else f"{provider}:{model}"
-    except Exception as e:
-        return f"missing:{str(e)[:60]}"
+    return get_model_id(agent)
 
 
 def build_graph(checkpointer=None):

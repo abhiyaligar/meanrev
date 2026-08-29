@@ -10,38 +10,19 @@ Docs: https://docs.langchain.com/oss/python/langchain/overview#create-an-agent
 """
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolCallLimitMiddleware, wrap_tool_call
-from langchain.messages import ToolMessage
+from langchain.agents.middleware import ToolCallLimitMiddleware
 
-from backend.core.config import get_settings
 from backend.core.system_prompt import RESEARCH_SYSTEM_PROMPT
+from backend.core.utils import get_model_id, handle_tool_errors
 from backend.tools.news_tools import extract_keywords, fetch_news, get_macro_calendar
 
 
-@wrap_tool_call
-def _handle_tool_errors(request, handler):
-    """Per docs: handle tool execution errors with custom message — do not swallow network failures."""
-    try:
-        return handler(request)
-    except Exception as e:
-        return ToolMessage(content=f"Tool error: Please check input and try again. ({str(e)})", tool_call_id=request.tool_call["id"])
-
-
-# Built-in middleware per docs: limits + error handling
-_RESEARCH_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=20, run_limit=10), _handle_tool_errors]
+# Built-in middleware per docs: limits + error handling — single source via core/utils
+_RESEARCH_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=20, run_limit=10), handle_tool_errors]
 
 
 def _model_id() -> str:
-    try:
-        s = get_settings()
-        provider = s.llm_provider
-        model = s.get_model("research")
-        if ":" in model and model.split(":")[0] in ("openrouter", "groq", "modal", "openai", "anthropic", "google_genai"):
-            return model
-        return model if provider == "modal" else f"{provider}:{model}"
-    except Exception as e:
-        # Compulsory from .env — return error placeholder for stub mode, never hardcoded model
-        return f"missing:{str(e)[:60]}"
+    return get_model_id("research")
 
 
 def get_research_agent():

@@ -10,21 +10,12 @@ Docs: https://docs.langchain.com/oss/python/releases/langchain-v1#create_agent
 """
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolCallLimitMiddleware, wrap_tool_call
-from langchain.messages import ToolMessage
+from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolCallLimitMiddleware
 
-from backend.core.config import get_settings
 from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
+from backend.core.utils import get_model_id, handle_tool_errors
 from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
 from backend.tools.market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
-
-
-@wrap_tool_call
-def _handle_tool_errors(request, handler):
-    try:
-        return handler(request)
-    except Exception as e:
-        return ToolMessage(content=f"Tool error: Please check input and try again. ({str(e)})", tool_call_id=request.tool_call["id"])
 
 
 # HITL per docs: interrupt on sensitive write tool submit_order (requires approve/edit/reject), reads auto-approved
@@ -43,19 +34,11 @@ _HITL_MIDDLEWARE = HumanInTheLoopMiddleware(
     description_prefix="Order submission pending human approval",
 )
 
-_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), _handle_tool_errors, _HITL_MIDDLEWARE]
+_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), handle_tool_errors, _HITL_MIDDLEWARE]
 
 
 def _model_id() -> str:
-    try:
-        s = get_settings()
-        provider = s.llm_provider
-        model = s.get_model("strategy")
-        if ":" in model and model.split(":")[0] in ("openrouter", "groq", "modal", "openai", "anthropic", "google_genai"):
-            return model
-        return model if provider == "modal" else f"{provider}:{model}"
-    except Exception as e:
-        return f"missing:{str(e)[:60]}"
+    return get_model_id("strategy")
 
 
 def get_strategy_agent(checkpointer=None):

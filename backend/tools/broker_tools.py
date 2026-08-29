@@ -7,9 +7,11 @@ No secrets logged; symbols normalized to upper.
 """
 
 import json
+
 from langchain.tools import tool
 
 from backend.broker import client as broker_client
+from backend.core.utils import clamp_limit, normalize_symbol
 
 
 @tool
@@ -26,7 +28,7 @@ def get_account() -> str:
 def get_positions(symbol: str = "") -> str:
     """List open positions with unrealized P&L. If symbol provided (e.g. 'AAPL'), returns single position or empty list. Symbol is case-insensitive."""
     try:
-        sym = symbol.strip().upper() if symbol.strip() else None
+        sym = normalize_symbol(symbol)
         positions = broker_client.get_positions(symbol=sym)
         return json.dumps({"count": len(positions), "positions": positions}, default=str)
     except Exception as e:
@@ -37,17 +39,10 @@ def get_positions(symbol: str = "") -> str:
 def get_orders(status: str = "open", limit: int = 50, symbols: str = "") -> str:
     """List orders and fills. Args: status open|closed|all (default open), limit 1..500 (default 50), symbols comma list e.g. 'AAPL,SPY' (optional)."""
     try:
-        # Normalize
         status = status.strip().lower() if status else "open"
         if status not in ("open", "closed", "all"):
             status = "open"
-        try:
-            lim = int(limit)
-        except (TypeError, ValueError):
-            lim = 50
-        if lim < 1:
-            lim = 1
-        lim = min(lim, 500)
+        lim = clamp_limit(limit, default=50, min_val=1, max_val=500)
         syms = symbols.strip() if symbols.strip() else None
         orders = broker_client.get_orders(status=status, limit=lim, symbols=syms)
         return json.dumps({"count": len(orders), "orders": orders, "status": status, "limit": lim}, default=str)
@@ -70,7 +65,7 @@ def get_clock() -> str:
 def submit_order(symbol: str, qty: float, side: str = "buy", order_type: str = "market", limit_price: float = 0.0) -> str:
     """Submit a paper order (requires human approval via HITL). Args: symbol e.g. 'AAPL' (required), qty >0 (required), side buy|sell (default buy), order_type market|limit (default market), limit_price for limit orders. Returns order_id or error. Throttled 25/min."""
     try:
-        sym = symbol.strip().upper()
+        sym = normalize_symbol(symbol)
         if not sym:
             return json.dumps({"error": "symbol required"})
         try:
