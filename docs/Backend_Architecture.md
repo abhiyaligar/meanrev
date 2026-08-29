@@ -2,7 +2,8 @@
 
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
-**Principle:** No UI, autonomous agent workflow only. Risk v1 is deterministic rule-based. ML surrogate risk is deferred to v2.
+**Principle:** No UI, autonomous agent workflow only. Risk v1 is deterministic rule-based. ML surrogate risk is deferred to v2.  
+**Last Updated:** Phase 9 — Strategy ATR sizing, token counter, options guarantee, HITL execution modes, Risk Phase 6, Reporting Phase 8, Tools + System_Prompt centralization, utils deduplication
 
 ---
 
@@ -50,11 +51,15 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 | Strategy and Decision | `LLM_MODEL_STRATEGY` (default `openai/gpt-4o`) via OpenRouter / Groq / Modal | Signal synthesis combining sentiment with technical indicators, produces trade parameters; model ID read from `.env.example` → `.env` selector |
 | Reporting | `LLM_MODEL_REPORTING` (default `openai/gpt-4o-mini`) via same gateway | Structured log → human-readable summary; model ID read from `.env.example` selector |
 | LLM Provider Gateway | OpenRouter, Groq, or Modal | Provider abstraction — OpenRouter (unified), Groq (fast inference), or Modal (serverless GPU). Selected via `LLM_PROVIDER` env; models via `LLM_MODEL_*` selectors in `.env.example`. Direct keys remain fallback |
-| Risk Management | Deterministic Rules Engine (Python) | Position limits, exposure caps, daily drawdown circuit breaker; ML surrogate deferred to v2 |
-| Broker Integration | alpaca-py (official SDK) | Paper trading only, accessed through a throttled wrapper |
+| Risk Management | Deterministic Rules Engine (Python, `RISK_MAX_*` from `.env`) | Position limits 15%, exposure 60%, daily drawdown 3% → `logs/.paused` auto-pause, SPXW/XSP close-before-expiry; ML surrogate deferred to v2 |
+| Execution | Dual-mode `auto` (autonomous) vs `hitl` (Human-in-the-Loop via `langgraph.types.interrupt`) | `EXECUTION_MODE` + `HITL_ENABLED` from `.env`; `broker/client.submit_order` throttled `25/min` + `tenacity` + `30s` timeout, handles `market/limit/stop/options` with fill/partial/reject logging |
+| Broker Integration | `alpaca-py==0.44.0` + `tenacity==9.1.4` + `scipy` (optional) | Paper trading only, throttled wrapper (`tenacity.wait_exponential_jitter`, `is_retryable`); Greeks via `scipy.stats.norm` else `math.erf` |
 | Database | PostgreSQL plus TimescaleDB, optional | Deferred in v1; used only if flat-file logs prove insufficient for historical bars and audit history |
 | Caching and Rate Limiting | Redis | Token bucket for execution limiter (see §9.1), optional pub/sub between agent stages; configured via REDIS_URL in .env (e.g., redis://localhost:6379/0) |
+| Token Counter | `tiktoken==0.14.0` | Strategy prompt `<1000` tokens via `tiktoken.encoding_for_model`, `enforce_token_limit` truncates head/tail |
 | Evaluation | DeepEval with pytest and Promptfoo (Node CLI, separate) | Prompt regression and agent output quality checks, not imported into the application runtime |
+| DRY Utils | `backend/core/utils.py` | Single source for `get_model_id` (was 4×), `handle_tool_errors` (was 3×), `normalize_symbol`, `clamp_limit` — net -71 lines |
+| System Prompts | `backend/core/system_prompt.py` + `backend/System_Prompt.py` | Central registry for `RESEARCH/STRATEGY/REPORTING/RISK/EXECUTION/CLI` prompts, fetched via `get_system_prompt(agent)` |
 
 **Explicitly excluded in v1:** FastAPI backend service and React plus Tailwind frontend. These were removed after confirmation that a UI is not required and incurs unnecessary scope. The ML surrogate risk model using XGBoost or LSTM over Monte Carlo paths is also excluded from v1 for timeline reasons.
 
@@ -65,13 +70,14 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 The project is structured around the agent graph, not generic feature folders.
 
 - **cli:** Houses the REPL entrypoint, the prompt loop and command routing, and the handlers for slash commands such as status, positions, report, pause, and resume.
-- **agents:** Contains one module per specialized agent: research, strategy, risk, execution, and reporting. Each module encapsulates its prompt, input contract, and output contract.
-- **graph:** Holds the shared LangGraph state schema and the wiring that composes the agents into the execution graph.
-- **broker:** Encapsulates the Alpaca client wrapper and the rate limiting and backoff logic. No agent calls the SDK directly.
-- **data:** Separates market data handling (OHLCV aggregation and technical indicator computation) from news and sentiment fetching.
-- **core:** Centralizes configuration management, structured logging infrastructure, and shared domain models.
-- **logs:** Gitignored directory for JSON-line output that serves as the authoritative audit trail.
-- **Root configuration:** Environment template, ignore rules, and Python project manifest.
+- **agents:** Contains one module per specialized agent: research, strategy, risk, execution, and reporting. Each module encapsulates its prompt (fetched from `core/system_prompt.py`), input contract, and output contract; `research`/`strategy`/`reporting` are built-in `create_agent` with `HumanInTheLoopMiddleware` for `submit_order`.
+- **graph:** Holds the shared LangGraph state schema (`GraphState` with 7 fields: `messages`, `market_snapshot`, `research`, `strategy`, `risk`, `execution`, `reporting_context`) and the wiring (`research→strategy→risk→execution` with `approved_scaled` handling and `InMemorySaver` checkpointer for HITL).
+- **broker:** Encapsulates the Alpaca client wrapper (`get_account`, `get_positions`, `get_orders`, `get_clock`, `submit_order` for `market/limit/stop/options`) and the Redis-backed rate limiting (`25/min` Lua + `tenacity` retry + `30s` timeout).
+- **data:** Separates market data handling (`fetch_ohlcv` + `VWAP` + `RSI/MACD/EMA/BB/ATR` via `pandas_ta`, `fetch_option_chain` with Greeks via `scipy` else `math`, `align_timeframes`, `cache` TTL) from news and sentiment fetching (`fetch_news`, `get_macro_calendar`, `extract_keywords`).
+- **tools:** LangChain `@tool` wrappers (`broker_tools`, `market_tools`, `news_tools`) — 12 tools total, all respect `25/min` + `30s` timeout, `submit_order` is HITL-protected.
+- **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
+- **logs:** Gitignored directory for JSON-line output (`broker.jsonl`, `.paused` flag for circuit breaker) that serves as the authoritative audit trail.
+- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`), ignore rules, and Python project manifest.
 
 This layout ensures that a change to risk logic, execution throttling, or strategy prompting is isolated to a single directory with a clear ownership boundary.
 

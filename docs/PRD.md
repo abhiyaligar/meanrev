@@ -5,7 +5,8 @@
 **Hackathon window:** Fri Aug 28, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Official scoring window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Paper account starting balance for judging:** 100,000 dollars in a new dedicated paper account  
-**Evaluation focus:** Total equity change during the scoring window plus creativity, autonomy, and robustness of the agent workflow. Profit and loss matters but is not the sole factor. A user interface is not required per Alpaca.
+**Evaluation focus:** Total equity change during the scoring window plus creativity, autonomy, and robustness of the agent workflow. Profit and loss matters but is not the sole factor. A user interface is not required per Alpaca.  
+**Last Updated:** Phase 9 — Strategy `count_tokens<1000` via `tiktoken`, options guarantee, `ATR` sizing, instruction hook; Risk `RISK_MAX_*` + circuit breaker; Execution `auto` vs `hitl` + `submit_order` `market/limit/stop/options`; Reporting 5-section + export; `System_Prompt` central + `utils` DRY
 
 ---
 
@@ -97,9 +98,10 @@ Natural-language instructions from the CLI can modulate behavior at the top of t
 
 ### 6.3 Strategy Generation
 
-- The strategy agent, using GPT-4o via OpenRouter / Groq / Modal (selected via LLM_PROVIDER), must combine the research output with technical indicators and price history to produce a trade decision.
-- Indicators to be considered include RSI, MACD, EMA at 20, 50, and 200, Bollinger Bands, Average True Range, and VWAP aggregated at 1 minute, 5 minute, 1 hour, and 1 day.
-- The strategy output must include direction of buy, sell, or hold, sizing as notional or contract count, stop and target levels, and a concise rationale.
+- The strategy agent, using GPT-4o via OpenRouter / Groq / Modal (selected via `LLM_PROVIDER` + `LLM_MODEL_STRATEGY` compulsory from `.env` via `get_model_id`), must combine the research output with technical indicators and price history to produce a trade decision.
+- Indicators to be considered include RSI, MACD, EMA at 20, 50, and 200, Bollinger Bands, Average True Range, and VWAP aggregated at 1 minute, 5 minute, 1 hour, and 1 day (via `data/market.fetch_ohlcv` + `pandas_ta`).
+- The strategy output must include direction of buy, sell, or hold, sizing as notional or contract count, stop and target levels (tied to `ATR` via `compute_sizing(atr, equity, price, conservatism)` — `qty = min(equity*0.01/ATR, equity*0.15/price) * conservatism`, `stop = close-1.5*ATR`, `target = close+2.5*ATR`), and a concise rationale.
+- Prompt must be `<1000` tokens via `tiktoken` (`count_tokens` + `enforce_token_limit` truncating `catalyst_summary`); every decision must include an option leg (`ensure_options_in_decision` auto-injects `get_option_chain` if missing — hackathon requirement); natural-language instruction hook (`apply_instruction` for `conservative 0.5` / `aggressive 1.5` / `explain`) must be supported.
 
 ### 6.4 Risk Management
 

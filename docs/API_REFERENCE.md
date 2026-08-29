@@ -1,11 +1,12 @@
 # API Reference
 
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
-**Version:** v1 — Broker Read Surface  
+**Version:** v1 — Broker Read + Execution Surface (auto/hitl)  
 **Base URL:** `http://localhost:8000` (local) — all broker endpoints under `/api/v1`  
 **Auth:** None on HTTP — server uses `ALPACA_API_KEY` / `ALPACA_API_SECRET` from environment (gitignored, never logged). Paper trading enforced (`paper=True`).  
-**Rate Limit:** 25 req/min leaky bucket shared across all `/api/v1` calls + exponential backoff + jitter on 429/5xx/timeout.  
-**Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET
+**Rate Limit:** 25 req/min leaky bucket (Redis-backed Lua + `InMemory` fallback) shared across all `/api/v1` calls + `tenacity` exponential backoff + jitter on 429/5xx/timeout (30s hard timeout).  
+**Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
+**Last Updated:** Phase 9 — Strategy token counter + options + ATR sizing, Risk `RISK_MAX_*` + circuit breaker, Execution `auto` vs `hitl` + `submit_order` market/limit/stop/options
 
 ---
 

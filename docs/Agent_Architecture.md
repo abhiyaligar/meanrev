@@ -2,8 +2,9 @@
 
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
-**Orchestration:** LangChain plus LangGraph graph-based state machine  
-**Interface:** CLI only — no web frontend. Alpaca guidance is explicit that a user interface is not required and evaluation focuses on the autonomous agent workflow and trading performance.
+**Orchestration:** LangChain `create_agent` (built-in) + LangGraph `StateGraph` + `HumanInTheLoopMiddleware` + `ToolCallLimitMiddleware`  
+**Interface:** CLI only — no web frontend.  
+**Last Updated:** Phase 9 — Strategy `count_tokens<1000` via `tiktoken`, `options` guarantee, `ATR` sizing, `instruction` hook (`conservative` 0.5 / `aggressive` 1.5); Reporting deterministic + LLM with 5-section narrative; HITL execution `auto` vs `hitl` modes
 
 ---
 
@@ -107,10 +108,12 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 - Stop and target levels tied to volatility and structure.
 - A short rationale linking the decision to both the research narrative and the technical evidence.
 
-**Behavioral scope:**
-- Prompt is capped below 1,000 tokens and is the primary tuning surface for performance.
-- Must incorporate options when trading, per hackathon requirements. A strategy that never considers options is non-compliant.
+**Behavioral scope (Phase 9 — updated):**
+- Prompt is capped below 1,000 tokens and is the primary tuning surface for performance. Token counting via `tiktoken` (`count_tokens`, `enforce_token_limit`) truncates `research.catalyst_summary` if needed and logs `strategy_token_truncated`.
+- Must incorporate options when trading, per hackathon requirements. `ensure_options_in_decision()` auto-injects `get_option_chain` leg if LLM output has no option, guaranteeing compliance.
 - Does not enforce risk limits itself. It proposes, the risk agent disposes.
+- Sizing is ATR-based: `compute_sizing(atr, equity, price, conservatism)` → `qty = min(equity*0.01/ATR, equity*0.15/price) * conservatism` (0.5 conservative / 1.5 aggressive), `stop = close-1.5*ATR`, `target = close+2.5*ATR` via `fetch_ohlcv` ATR.
+- Natural-language instruction hook: `apply_instruction(state, "be more conservative")` → `strategy_conservatism=0.5`, `"more aggressive"` → `1.5`, `"explain last trade"` → `strategy_explain` — called at top of `strategy_agent` before LLM invoke.
 
 ### 4.3 Risk Management Agent — Deterministic Rules Engine, v1
 
@@ -126,10 +129,11 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 - The specific rule or threshold that determined the verdict.
 - The final order parameters that the execution agent is permitted to submit.
 
-**Rules enforced in v1:**
-- Per-position size limits.
-- Portfolio exposure caps.
-- The daily drawdown circuit breaker, for example an automatic pause if total equity drawdown exceeds negative 3 percent on the day. When triggered, the system transitions to a paused state that requires explicit CLI resume.
+**Rules enforced in v1 (via `.env` `RISK_MAX_*` — no hardcoded thresholds):**
+- Per-position size limits (`RISK_MAX_POSITION_PCT=0.15` → `notional/equity <=15%` else `approved_scaled` with `adjusted_qty = equity*0.15/price`).
+- Portfolio exposure caps (`RISK_MAX_EXPOSURE_PCT=0.60` → `gross/equity <=60%`).
+- The daily drawdown circuit breaker (`RISK_DAILY_DRAWDOWN_PCT=0.03` → `drawdown=(equity-peak)/peak < -3%` → writes `logs/.paused` auto-pause, requires explicit `CLI /resume` via `clear_pause()`).
+- Cash-settled index options (SPXW/XSP) via `check_spxw_settlement` — flags `should_close_before_expiry` if `days_to_expiry <=1`.
 
 **Explicitly deferred:**
 - The ML surrogate risk model that would approximate Value at Risk over simulated portfolio paths using XGBoost, LightGBM, or LSTM and deliver sub-10-millisecond estimates. This was in the original draft and is now a documented v2 extension. It is not a v1 dependency and no agent in v1 performs learned risk scoring.
@@ -147,9 +151,13 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 - Log entries that capture throttling, retry, and fill outcome.
 
 **Safeguards applied:**
-- A leaky-bucket rate limiter targeting 25 requests per minute, providing headroom below the platform cap. All Alpaca calls are funneled through this limiter.
-- Exponential backoff with jitter on timeouts and rate-limit responses.
-- No direct Alpaca SDK usage outside this agent and its underlying broker wrapper.
+- A leaky-bucket rate limiter targeting 25 requests per minute (Redis-backed Lua + `InMemory` fallback, `25/60` refill) via `broker/rate_limit.bucket`, shared with `strategy` tools.
+- Exponential backoff with jitter on timeouts/429s via `tenacity` (`wait_exponential_jitter(0.5,8)`, `stop_after_attempt(4)`) + `30s` hard timeout via `ThreadPoolExecutor`.
+- No direct Alpaca SDK usage outside `broker/client.submit_order` (throttled wrapper, `paper=True` guard).
+
+**Dual execution modes (via `.env` `EXECUTION_MODE` + `HITL_ENABLED`):**
+- `auto` (`HITL_ENABLED=false`) — `approved(_scaled)` → directly `broker/client.submit_order(market/limit/stop/options, 25/min)` → handles `filled/partial/reject/timeout` + `latency_ms` logging.
+- `hitl` (`HITL_ENABLED=true`) — `approved` → `langgraph.types.interrupt({"action":"place_order","order":payload})` → pauses graph (requires `InMemorySaver` + `thread_id`), human resumes via `Command(resume={"decisions":[{"type":"approve|edit|reject"}]})` → `HumanInTheLoopMiddleware` on `submit_order` (reads auto-approved).
 
 **Options awareness:**
 - When the strategy considers cash-settled index options near expiry, the execution layer prefers a close-before-expiry outcome. Holding such positions to settlement is discouraged because the resulting cash journal entry may not be visible until the next morning, obscuring true profit and loss.
