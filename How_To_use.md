@@ -4,6 +4,43 @@
 
 ---
 
+## Single Command `meanrev` — Like `claude` / `codex` (Copy-Paste)
+
+**Install once** (creates `meanrev` in `venv/Scripts/meanrev.exe` + wrappers `meanrev.bat`/`meanrev`):
+```bash
+pip install -e .   # from repo root, creates meanrev
+meanrev --help     # same as python -m backend.cli --help
+```
+
+**Copy-paste for scoring vs dry-run:**
+
+```bash
+# Auto mode — autonomous, no HITL (for Aug 31 9:30 ET scoring window, unattended)
+# .env: EXECUTION_MODE=auto  HITL_ENABLED=false
+meanrev --mode auto --thread-id scoring-0831 --symbol SPY
+# → ₳  prompt → type natural language or /status
+# → to run unattended in background (Windows):
+#   start /B meanrev --mode auto --thread-id scoring-0831
+
+# HITL mode — human approval for every order (for dry-run, large/risky orders, SPXW)
+# .env: EXECUTION_MODE=hitl  HITL_ENABLED=true  (or override via --mode hitl)
+meanrev --mode hitl --thread-id dry-run-01 --symbol AAPL
+# In REPL: buy 10 AAPL + 30d call
+# → execution pauses: Order pending approval: buy 10 AAPL (approved) — risk rule: position ok ...
+# → choose approve / edit / reject via questionary (or via API Command(resume=...))
+
+# Dry-run (no live orders, only log)
+meanrev --mode hitl --thread-id dry-run-01 --dry-run
+# In REPL: /report 50 reports/dry-run.md  → 5-section report + P&L
+
+# Alternatives if meanrev not on PATH (same behavior)
+python -m backend.cli --mode auto --thread-id scoring-0831
+.\meanrev.bat --mode auto --thread-id scoring-0831   # Windows wrapper
+./meanrev --mode hitl --thread-id dry-run-01          # Unix wrapper
+```
+
+---
+
 ## 1. Quick Start (Copy → Configure → Run)
 
 ```bash
