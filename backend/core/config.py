@@ -133,10 +133,11 @@ class Settings(BaseSettings):
         return {"provider": provider}
 
     def is_llm_configured(self) -> bool:
-        """True if selected provider has a credential available."""
+        """True only if selected provider has its explicit credential available.
+        """
         cfg = self.llm_provider_config()
         if cfg["provider"] == "openrouter":
-            return bool(cfg.get("api_key") or cfg.get("fallback_key"))
+            return bool(cfg.get("api_key"))
         if cfg["provider"] == "groq":
             return bool(cfg.get("api_key"))
         if cfg["provider"] == "modal":

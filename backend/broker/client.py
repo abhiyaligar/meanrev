@@ -9,13 +9,14 @@ All Alpaca Trading API access funnels here.
 """
 
 import time
+import concurrent.futures
 from typing import Any, Dict, List, Optional
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
 
-from backend.app.config import get_settings
+from backend.core.config import get_settings
 from backend.broker.rate_limit import bucket, RateLimitExceeded, backoff_delay, is_retryable_exception, MAX_RETRIES
 
 
@@ -62,10 +63,23 @@ def _dump_list(objs: List[Any]) -> List[Dict[str, Any]]:
     return [_dump(o) for o in objs]
 
 
-def _call_with_retry(fn, *args, **kwargs):
+def _run_with_timeout(fn, timeout: float = 30.0, *args, **kwargs):
+    """Run fn with a hard timeout (default 30s) to avoid hung worker threads."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as e:
+            # Cancel best-effort
+            future.cancel()
+            raise TimeoutError(f"Alpaca call timed out after {timeout}s") from e
+
+
+def _call_with_retry(fn, *args, timeout: float = 30.0, **kwargs):
     """
-    Wrapper: consume token, call fn, retry on retryable with backoff.
+    Wrapper: consume token, call fn with timeout, retry on retryable with backoff.
     RateLimitExceeded from bucket → immediate BrokerRateLimitError (no retry).
+    timeout: per-request timeout in seconds (default 30s) per VULN 3 fix.
     """
     try:
         bucket.consume(1)
@@ -75,7 +89,7 @@ def _call_with_retry(fn, *args, **kwargs):
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            return fn(*args, **kwargs)
+            return _run_with_timeout(fn, timeout, *args, **kwargs)
         except BrokerRateLimitError:
             raise
         except AlpacaConnectionError:
@@ -111,13 +125,17 @@ def get_account() -> Dict[str, Any]:
 def get_positions(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     List open positions. If symbol provided, returns single-element list or [].
+    Symbol is normalized to upper-case per VULN 6 fix.
     """
+
+    # Normalize symbol to upper-case, stripped
+    norm_symbol = symbol.strip().upper() if symbol and symbol.strip() else None
 
     def _do():
         client = _create_trading_client()
-        if symbol:
+        if norm_symbol:
             try:
-                pos = client.get_open_position(symbol)
+                pos = client.get_open_position(norm_symbol)
                 return [_dump(pos)]
             except Exception as e:
                 # alpaca-py raises 404-like for missing position — map to empty list
@@ -146,8 +164,14 @@ def get_orders(
 
     def _do():
         client = _create_trading_client()
-        # Clamp limit
-        lim = max(1, min(int(limit), 500))
+        # Clamp limit — explicit guard for limit<1 per VULN 7
+        try:
+            lim_raw = int(limit)
+        except (TypeError, ValueError):
+            lim_raw = 50
+        if lim_raw < 1:
+            lim_raw = 1
+        lim = min(lim_raw, 500)
         # Map status
         status_map = {
             "open": QueryOrderStatus.OPEN,

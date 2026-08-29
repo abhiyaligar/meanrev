@@ -18,19 +18,21 @@ LOG_FILE = LOG_DIR / "broker.jsonl"
 # Ensure logs dir exists (has .gitkeep)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Configure stdlib logger
+# Configure stdlib logger — thread-safe init per VULN 9
 _logger = logging.getLogger("broker")
-if not _logger.handlers:
-    _logger.setLevel(logging.INFO)
-    # File handler — JSON lines
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    _logger.addHandler(fh)
-    # Stream handler for terminal (when running via uvicorn, uvicorn handles it anyway)
-    sh = logging.StreamHandler()
-    sh.setLevel(logging.INFO)
-    _logger.addHandler(sh)
-    _logger.propagate = False
+_logger_lock = __import__("threading").Lock()
+with _logger_lock:
+    if not _logger.handlers:
+        _logger.setLevel(logging.INFO)
+        # File handler — JSON lines
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        _logger.addHandler(fh)
+        # Stream handler for terminal (when running via uvicorn, uvicorn handles it anyway)
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.INFO)
+        _logger.addHandler(sh)
+        _logger.propagate = False
 
 
 def _redact(obj: Any) -> Any:
