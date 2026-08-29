@@ -40,8 +40,14 @@ pnpm-debug.log*
 /data/
 *.csv
 !sample_data.csv
-!backend/data/
-!backend/data/**
+!backend/data/market.py
+!backend/data/news.py
+!backend/data/__init__.py
+# Re-ignore pycache inside backend/data (negation above would un-ignore it)
+backend/data/__pycache__/
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
 
 
 # --- Models / artifacts ---
