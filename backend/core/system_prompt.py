@@ -35,7 +35,7 @@ Do not trade. Keep summary concise (<1000 tokens) and audit-ready."""
 
 # --- Graph-level prompts (reused in graph/build.py for node context) ---
 GRAPH_RESEARCH_PROMPT = "Perform market research: fetch news and macro calendar, output sentiment and regime as JSON."
-GRAPH_STRATEGY_PROMPT_TEMPLATE = "Research: {research}. Now synthesize with market data (use get_ohlcv for AAPL/SPY) and options (get_option_chain) to propose a trade. Every strategy must consider options."
+GRAPH_STRATEGY_PROMPT_TEMPLATE = "Research: {research}. Now synthesize with market data — use get_ohlcv for the symbols mentioned in the user's request (e.g., BTC/USD, ETH/USD, AAPL, SPY) and options (get_option_chain for equities) or detect_arbitrage for crypto arb (pass exact pairs from prompt) — to propose a trade. For equities every strategy must consider options; for crypto focus on spot/arb."
 GRAPH_REPORTING_PROMPT = "Generate the trading report from logs/broker.jsonl."
 
 # --- Risk & Execution — deterministic, but keep prompt placeholders for future LLM-assisted variants ---
