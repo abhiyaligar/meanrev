@@ -1,24 +1,121 @@
 """
-Strategy agent — stub for import stability (VULN 5 fix).
+Strategy agent — built-in LangChain create_agent per docs.
 
-Full implementation is Phase 9 (GPT-4o via LLM_PROVIDER).
-Expose `strategy_agent` for `from backend.agents.strategy import strategy_agent`.
-Model selector-driven via `LLM_MODEL_STRATEGY` — no hardcoded model here.
+DOC.md §3: GPT-4o via LLM_PROVIDER, model ID from LLM_MODEL_STRATEGY selector.
+Uses create_agent (LangChain 1.0) with ToolNode + middleware, not custom dict logic.
+
+Docs: https://docs.langchain.com/oss/python/releases/langchain-v1#create_agent
+- Built on basic loop: model → tool choice → execute via ToolNode → finish when no tool calls
+- Middleware handles tool limits and error handling (replaces custom loops)
 """
+
+from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware, wrap_tool_call
+from langchain.messages import ToolMessage
+
+from backend.core.config import get_settings
+from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
+from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions
+from backend.tools.market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
+
+
+@wrap_tool_call
+def _handle_tool_errors(request, handler):
+    try:
+        return handler(request)
+    except Exception as e:
+        return ToolMessage(content=f"Tool error: Please check input and try again. ({str(e)})", tool_call_id=request.tool_call["id"])
+
+
+_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), _handle_tool_errors]
+
+
+def _model_id() -> str:
+    try:
+        s = get_settings()
+        provider = s.llm_provider
+        model = s.get_model("strategy")
+        if ":" in model and model.split(":")[0] in ("openrouter", "groq", "modal", "openai", "anthropic", "google_genai"):
+            return model
+        return model if provider == "modal" else f"{provider}:{model}"
+    except Exception as e:
+        return f"missing:{str(e)[:60]}"
+
+
+def get_strategy_agent():
+    """
+    Factory — returns built-in LangChain agent per docs.
+    Handles missing provider package via fallback init_chat_model.
+    """
+    try:
+        return create_agent(
+            model=_model_id(),
+            tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock],
+            system_prompt=STRATEGY_SYSTEM_PROMPT,
+            middleware=_MIDDLEWARE,
+        )
+    except Exception as e:
+        if "langchain-openrouter" in str(e) or "langchain-groq" in str(e).lower():
+            try:
+                from langchain.chat_models import init_chat_model
+
+                from backend.core.config import get_settings
+
+                s = get_settings()
+                cfg = s.llm_provider_config()
+                model_name = s.get_model("strategy")
+                fallback = init_chat_model(
+                    model_name,
+                    model_provider="openai",
+                    api_key=cfg.get("api_key"),
+                    base_url=cfg.get("base_url"),
+                    temperature=0.5,
+                )
+                return create_agent(
+                    model=fallback,
+                    tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock],
+                    system_prompt=STRATEGY_SYSTEM_PROMPT,
+                    middleware=_MIDDLEWARE,
+                )
+            except Exception as e2:
+                from backend.core.logging import log_event
+
+                log_event("strategy_agent_fallback_failed", level="warning", error=str(e2)[:200])
+                return None
+        from backend.core.logging import log_event
+
+        log_event("strategy_agent_create_failed", level="warning", error=str(e)[:200])
+        return None
 
 
 def strategy_agent(state: dict) -> dict:
     """
-    Stub — returns hold with zero size and stub rationale.
-    Real implementation will combine research + technicals + account state,
-    enforce <1000 token prompt, and ensure options in every decision.
+    Adapter for StateGraph nodes expecting strategy_agent(state) -> dict.
+    Invokes built-in agent when LLM configured, else stub so graph never fails.
     """
+    try:
+        from backend.core.config import get_settings
+
+        if get_settings().is_llm_configured():
+            agent = get_strategy_agent()
+            research_out = state.get("research", {})
+            prompt = f"Research: {research_out}. Now synthesize with market data (use get_ohlcv for AAPL/SPY) and options (get_option_chain) to propose a trade. Every strategy must consider options."
+            msgs = state.get("messages", []) + [{"role": "user", "content": prompt}]
+            result = agent.invoke({"messages": msgs})
+            last = result.get("messages", [{}])[-1]
+            content = getattr(last, "content", str(last)) if hasattr(last, "content") else str(last)
+            state["strategy"] = {"output": str(content), "agent": "strategy", "model": _model_id(), "built_in": True}
+            return state
+    except Exception:
+        pass
+
     state.setdefault("strategy", {})
     state["strategy"] = {
         "action": "hold",
         "symbol": None,
         "qty": 0,
-        "rationale": "stub — Phase 9 not yet implemented",
+        "rationale": "stub — LLM not configured or strategy agent unavailable",
         "stub": True,
+        "model": _model_id(),
     }
     return state

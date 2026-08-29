@@ -35,9 +35,11 @@ pnpm-debug.log*
 # --- Databases / data ---
 *.db
 *.sqlite3
-data/
+/data/
 *.csv
 !sample_data.csv
+!backend/data/
+!backend/data/**
 
 
 # --- Models / artifacts ---
@@ -63,5 +65,6 @@ Thumbs.db
 *_credentials.json
 
 #---- Docs ---
-DOC.md
-Phases.md
+# DOC.md and PHASES.md are tracked — do not ignore
+# DOC.md
+# PHASES.md

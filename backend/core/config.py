@@ -53,21 +53,21 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
 
-    # --- Model selectors — single source of truth for all agents ---
-    llm_model_market_research: str = Field(
-        default="anthropic/claude-3.5-sonnet",
+    # --- Model selectors — single source of truth, COMPULSORY from .env (no hardcoded model names) ---
+    llm_model_market_research: Optional[str] = Field(
+        default=None,
         alias="LLM_MODEL_MARKET_RESEARCH",
-        description="Research agent model ID, e.g. anthropic/claude-3.5-sonnet",
+        description="Research agent model ID — compulsory from .env via .env.example. No hardcoded default in code.",
     )
-    llm_model_strategy: str = Field(
-        default="openai/gpt-4o",
+    llm_model_strategy: Optional[str] = Field(
+        default=None,
         alias="LLM_MODEL_STRATEGY",
-        description="Strategy agent model ID, e.g. openai/gpt-4o",
+        description="Strategy agent model ID — compulsory from .env via .env.example. No hardcoded default.",
     )
-    llm_model_reporting: str = Field(
-        default="openai/gpt-4o-mini",
+    llm_model_reporting: Optional[str] = Field(
+        default=None,
         alias="LLM_MODEL_REPORTING",
-        description="Reporting agent model ID, e.g. openai/gpt-4o-mini",
+        description="Reporting agent model ID — compulsory from .env via .env.example. No hardcoded default.",
     )
 
     # --- Optional infra ---
@@ -92,17 +92,28 @@ class Settings(BaseSettings):
 
     def get_model(self, agent: str) -> str:
         """
-        Resolve model ID for an agent using selector, no hardcoded fallback in agents.
+        Resolve model ID for an agent using selector — compulsory from .env, no hardcoded fallback.
+        Raises if selector missing, forcing .env update via .env.example.
         agent: research | strategy | reporting (aliases: market_research, market)
         """
         key = agent.lower().strip()
+        val: Optional[str] = None
         if key in ("research", "market_research", "market"):
-            return self.llm_model_market_research
-        if key in ("strategy",):
-            return self.llm_model_strategy
-        if key in ("reporting", "report"):
-            return self.llm_model_reporting
-        raise ValueError(f"Unknown agent model selector: {agent}")
+            val = self.llm_model_market_research
+        elif key in ("strategy",):
+            val = self.llm_model_strategy
+        elif key in ("reporting", "report"):
+            val = self.llm_model_reporting
+        else:
+            raise ValueError(f"Unknown agent model selector: {agent}")
+
+        if not val or not val.strip():
+            raise ValueError(
+                f"LLM model for '{agent}' not set — define "
+                f"{'LLM_MODEL_MARKET_RESEARCH' if key in ('research','market_research','market') else 'LLM_MODEL_STRATEGY' if key=='strategy' else 'LLM_MODEL_REPORTING'} "
+                f"in .env (see .env.example). No hardcoded default."
+            )
+        return val.strip()
 
     def llm_provider_config(self) -> dict:
         """
