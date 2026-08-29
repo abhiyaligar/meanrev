@@ -38,7 +38,7 @@ pnpm-debug.log*
 data/
 *.csv
 !sample_data.csv
-DOC.md
+
 
 # --- Models / artifacts ---
 *.pkl
@@ -61,3 +61,7 @@ Thumbs.db
 # --- Alpaca / trading specific ---
 *paper_account*.json
 *_credentials.json
+
+#---- Docs ---
+DOC.md
+Phases.md

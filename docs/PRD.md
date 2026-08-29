@@ -74,7 +74,7 @@ The product therefore optimizes for verifiable autonomy: a small set of scoped a
 
 The product is a single autonomous pipeline organized as a graph of five specialized agents plus a CLI. It runs as a long-lived process that loops through sensing, deciding, checking, and acting, while persisting every step to a structured log.
 
-Market Research (Claude) → Strategy (GPT-4o) → Risk Management (deterministic) → Execution (throttled) → Reporting (log summarizer)
+Market Research (Claude 3.5 Sonnet via OpenRouter / Groq / Modal) → Strategy (GPT-4o via OpenRouter / Groq / Modal) → Risk Management (deterministic) → Execution (throttled) → Reporting (log summarizer)
 
 Natural-language instructions from the CLI can modulate behavior at the top of the graph, while slash commands provide direct operational control without invoking the full chain.
 
@@ -93,11 +93,11 @@ Natural-language instructions from the CLI can modulate behavior at the top of t
 
 - The system must monitor macro catalysts such as Federal Reserve speeches, Non-Farm Payrolls, Consumer Price Index, earnings, and benchmark revisions.
 - The system must ingest news headline sentiment, social velocity, and keyword signals.
-- The research agent, using Claude 3.5 Sonnet, must produce a qualitative sentiment vector and a macro regime classification with a compact catalyst summary.
+- The research agent, using Claude 3.5 Sonnet via OpenRouter / Groq / Modal (selected via LLM_PROVIDER), must produce a qualitative sentiment vector and a macro regime classification with a compact catalyst summary.
 
 ### 6.3 Strategy Generation
 
-- The strategy agent, using GPT-4o, must combine the research output with technical indicators and price history to produce a trade decision.
+- The strategy agent, using GPT-4o via OpenRouter / Groq / Modal (selected via LLM_PROVIDER), must combine the research output with technical indicators and price history to produce a trade decision.
 - Indicators to be considered include RSI, MACD, EMA at 20, 50, and 200, Bollinger Bands, Average True Range, and VWAP aggregated at 1 minute, 5 minute, 1 hour, and 1 day.
 - The strategy output must include direction of buy, sell, or hold, sizing as notional or contract count, stop and target levels, and a concise rationale.
 
@@ -224,8 +224,9 @@ Acceptance: A natural-language instruction is forwarded to the graph and reflect
 
 ## 12. Data and Model Specification
 
-- **Research model:** Claude 3.5 Sonnet for macro narrative, catalyst tracking, sentiment, and regime classification.
-- **Strategy model:** GPT-4o for signal synthesis and trade parameter generation.
+- **Research model:** Claude 3.5 Sonnet via OpenRouter / Groq / Modal for macro narrative, catalyst tracking, sentiment, and regime classification.
+- **Strategy model:** GPT-4o via OpenRouter / Groq / Modal for signal synthesis and trade parameter generation.
+- **LLM Provider Gateway:** OpenRouter (unified gateway for Claude + GPT-4o), Groq (fast inference), or Modal (serverless GPU for hosted models) — selected via LLM_PROVIDER env. Direct Anthropic/OpenAI keys remain fallback.
 - **Risk in v1:** Rule-based engine with explicit thresholds. No learned model.
 - **Risk in v2:** XGBoost or LightGBM trained on simulated portfolio paths to estimate Value at Risk in real time with a sub-10-millisecond target, replacing the rule engine when data and time allow.
 - All prompts are subject to regression testing via DeepEval and comparative evaluation via Promptfoo.

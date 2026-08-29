@@ -29,7 +29,7 @@ Flow in order:
 
 Between each stage the graph persists the updated shared state so that downstream agents have full context and so that every transition is auditable through logging.
 
-Market Research (Claude 3.5 Sonnet) → sentiment and macro regime → Strategy (GPT-4o) → proposed trade parameters → Risk Management (deterministic rules, v1) → validated or adjusted order or rejection → Execution (throttled Alpaca client) → execution confirmation → Reporting (log reader and summarizer)
+Market Research (Claude 3.5 Sonnet via OpenRouter / Groq / Modal) → sentiment and macro regime → Strategy (GPT-4o via OpenRouter / Groq / Modal) → proposed trade parameters → Risk Management (deterministic rules, v1) → validated or adjusted order or rejection → Execution (throttled Alpaca client) → execution confirmation → Reporting (log reader and summarizer)
 
 Natural-language instructions from the CLI can influence the graph at the top, for example making the system more conservative, without changing agent code. Direct slash commands bypass the graph for operational inspection.
 
@@ -64,9 +64,13 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 
 ## 4. Agent Specifications
 
-### 4.1 Market Research Agent — Claude 3.5 Sonnet
+### 4.1 Market Research Agent — `LLM_MODEL_MARKET_RESEARCH` (via OpenRouter / Groq / Modal)
 
 **Role:** Macro and catalyst awareness, qualitative judgment.
+
+**Model Selector:** `LLM_MODEL_MARKET_RESEARCH` defined in `.env.example` (default `anthropic/claude-3.5-sonnet`), read at startup via `core/config.py`. No hardcoded model string in code.
+
+**Provider:** Served through OpenRouter, Groq, or Modal per `LLM_PROVIDER` env (OpenRouter recommended for unified access; Groq for speed; Modal for serverless GPU). Falls back to direct Anthropic key if gateway not set.
 
 **Consumes:**
 - Macro catalyst feed including Federal Reserve speeches, Non-Farm Payrolls, Consumer Price Index prints, earnings announcements, and benchmark revisions.
@@ -83,9 +87,13 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 - Explicitly avoids repeating technical indicator computation. Technicals are owned by the data and strategy layers.
 - Output is designed to be concise so that the downstream strategy prompt remains within the token cap.
 
-### 4.2 Strategy Agent — GPT-4o
+### 4.2 Strategy Agent — `LLM_MODEL_STRATEGY` (via OpenRouter / Groq / Modal)
 
 **Role:** Signal synthesis and trade parameter generation.
+
+**Model Selector:** `LLM_MODEL_STRATEGY` defined in `.env.example` (default `openai/gpt-4o`), read at startup via `core/config.py`. No hardcoded model string in code.
+
+**Provider:** Served through OpenRouter, Groq, or Modal per `LLM_PROVIDER` env (OpenRouter recommended for unified access; Groq for speed; Modal for custom hosted models). Falls back to direct OpenAI key if gateway not set.
 
 **Consumes:**
 - The research agent sentiment and regime output.
@@ -146,9 +154,11 @@ All strategy and research prompts are kept below 1,000 tokens. This constraint l
 **Options awareness:**
 - When the strategy considers cash-settled index options near expiry, the execution layer prefers a close-before-expiry outcome. Holding such positions to settlement is discouraged because the resulting cash journal entry may not be visible until the next morning, obscuring true profit and loss.
 
-### 4.5 Reporting Agent — Log Reader and Summarizer
+### 4.5 Reporting Agent — Log Reader and Summarizer (`LLM_MODEL_REPORTING` via same gateway)
 
 **Role:** Turn the audit trail into a judging and debugging artifact.
+
+**Model Selector:** `LLM_MODEL_REPORTING` defined in `.env.example` (default `openai/gpt-4o-mini`), read at startup via `core/config.py`. No hardcoded model string in code.
 
 **Consumes:**
 - The structured JSON-line log that every upstream agent appends to.
@@ -209,8 +219,9 @@ The CLI is an interactive REPL modeled after the Claude Code interaction pattern
 
 ## 8. Core Support — Configuration, Logging, Domain Models
 
-- Configuration is loaded from environment with a committed example and a gitignored secrets file. The system distinguishes a development paper account from the dedicated submission account that must start at 100,000 dollars.
-- Logging is structured and JSON-line oriented. Every agent transition is recorded with enough context to reconstruct why a decision was made.
+- Configuration is loaded from environment with a committed example and a gitignored secrets file, including `LLM_PROVIDER` and `LLM_MODEL_*` selectors (single source of truth for all agents). Models are never hardcoded — `core/config.py` reads `LLM_MODEL_MARKET_RESEARCH`, `LLM_MODEL_STRATEGY`, `LLM_MODEL_REPORTING` from `.env.example` → `.env` and agents resolve the provider at startup.
+- The system distinguishes a development paper account from the dedicated submission account that must start at 100,000 dollars.
+- Logging is structured and JSON-line oriented. Every agent transition is recorded with enough context to reconstruct why a decision was made, including which model ID was used for each LLM call.
 - Shared domain models define the shapes of trade decisions, risk verdicts, and report sections so that agents, graph, and logging agree on contracts.
 
 ---
@@ -243,7 +254,29 @@ Cash-settled index options such as SPXW and XSP settle through an overnight cash
 
 ---
 
-## 11. Deferred and v2 Extensions
+## 11. MCP Server and CLI Integration
+
+Per hackathon requirements, every submission must use at least one of the Alpaca MCP Server or Alpaca CLI in addition to the Trading API. This system satisfies the requirement through the broker and execution surfaces, with traceable usage recorded in logs and the report.
+
+**MCP Server integration:**
+- The MCP Server provides a bridge for Claude, Cursor, or VS Code to invoke Alpaca tools in the paper environment.
+- In v1, the primary consumer is the operator-side workflow: the research and strategy prompts can be exercised through an MCP-connected assistant that reads the same account and market data as the autonomous loop, allowing the operator to validate prompts and inspect positions without manual curl calls.
+- The server is configured against the dedicated submission paper account (starting balance one hundred thousand dollars) and is not used per trade inside the autonomous graph — the graph calls the broker wrapper directly for deterministic throttling (25 requests per minute) and backoff. This separation keeps the autonomous loop auditable while still demonstrating MCP usage.
+- A typical MCP tool call exercised during development and dry-run is a paper account or positions read, with the response compared to the CLI live view to confirm parity.
+
+**Alpaca CLI integration:**
+- The CLI (`alpaca`) provides terminal JSON output for account, positions, orders, and market data, suitable for automation and for pre-market validation scripts.
+- In v1, the CLI is used for operational validation outside the scoring window: verifying authentication against the new submission account, confirming the paper clock, and shadowing a cycle of the reporting agent output against a direct `alpaca` query. These checks are run before Monday August thirty first so that authentication or configuration issues surface early.
+- During the scoring window the CLI is not the order submission path — the execution agent remains the sole throttled submitter — but its usage is documented in the one-page write-up under Alpaca infrastructure as required.
+
+**Evidence for judging:**
+- The one-page write-up lists which MCP tools or CLI commands were used, against which paper account, and with what observed results.
+- The structured log retains the broker reads that are equivalent to the MCP and CLI reads, so judges can correlate the documented MCP or CLI usage with the autonomous loop behavior.
+- Either MCP Server or CLI satisfies the requirement; this system documents both options and uses at least one in the operational workflow.
+
+---
+
+## 12. Deferred and v2 Extensions
 
 - **ML surrogate risk model:** An XGBoost or LightGBM model trained on many simulated portfolio paths to estimate Value at Risk in real time, restoring the original sub-10-millisecond goal. This replaces the v1 deterministic rules engine when sufficient data and training time are available.
 - **Relational persistence:** PostgreSQL with TimescaleDB for long-horizon historical bars and agent audit history if flat-file logs prove insufficient.
@@ -251,7 +284,7 @@ Cash-settled index options such as SPXW and XSP settle through an overnight cash
 
 ---
 
-## 12. Operational Requirements for Submission
+## 13. Operational Requirements for Submission
 
 - Create a new Alpaca paper account with a starting balance of exactly 100,000 dollars for this submission. Do not reuse a testing account or the score will be ineligible.
 - Load that account key and secret into the environment file using the provided template.
@@ -261,7 +294,7 @@ Cash-settled index options such as SPXW and XSP settle through an overnight cash
 
 ---
 
-## 13. Decision Log
+## 14. Decision Log
 
 - **Dropped the dashboard.** The React and Tailwind frontend and the FastAPI backend service were removed after Alpaca clarified that a user interface is not required and that evaluation centers on the autonomous workflow and profit and loss.
 - **Deferred the ML risk surrogate.** The 100,000-path Monte Carlo plus XGBoost or LSTM estimator was replaced by enforceable deterministic thresholds for v1 to preserve reliability under the one-week build window.

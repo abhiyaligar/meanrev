@@ -1,108 +1,246 @@
 # API Reference
 
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
-**Version:** v1 — Hackathon Scoring Window Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
-**Base URL:** None in v1 — No HTTP service is exposed
+**Version:** v1 — Broker Read Surface  
+**Base URL:** `http://localhost:8000` (local) — all broker endpoints under `/api/v1`  
+**Auth:** None on HTTP — server uses `ALPACA_API_KEY` / `ALPACA_API_SECRET` from environment (gitignored, never logged). Paper trading enforced (`paper=True`).  
+**Rate Limit:** 25 req/min leaky bucket shared across all `/api/v1` calls + exponential backoff + jitter on 429/5xx/timeout.  
+**Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET
 
 ---
 
-## 1. Status — No HTTP APIs in v1
+## 1. Overview
 
-There are no active HTTP APIs in v1.
+v1 exposes a **read-only broker surface** that proxies Alpaca Trading API through a single throttled wrapper (`backend/broker/client.py`). No write endpoints (`POST /orders`, `DELETE /orders`) are active in v1 to keep the scoring window safe.
 
-Per DOC.md §1 and §2, the FastAPI backend and React frontend from the original draft were explicitly removed after Alpaca confirmed that a user interface is not required and that evaluation focuses on the autonomous agent workflow and trading performance. The system is CLI-only in v1 and all Alpaca interactions are performed through the throttled broker surface using alpaca-py, not through a self-hosted HTTP layer.
+All responses are JSON with a `ts` ISO-8601 timestamp. Errors use a shared shape. Every call is logged as a JSON line to `backend/logs/broker.jsonl` (never secrets).
 
-This document is intentionally empty of active endpoints. It exists as the placeholder where /api/v1 endpoints will be documented when a HTTP surface is specified.
-
-If you are looking for platform APIs, see §3 for the external Alpaca surfaces that this system consumes. If you are looking for operator interaction, see the CLI surface in DOC.md §4 and Agent_Architecture.md §6.
+Legacy endpoint `GET /get_account` is retained as a deprecated alias for backward compatibility and will be removed in v2. Use `GET /api/v1/account`.
 
 ---
 
-## 2. Active Endpoints — None
+## 2. Active Endpoints
 
-### Base Path Convention (Reserved for Future)
+| Method | Path | Description | In Schema | Out Schema | Errors |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| GET | `/health` | Liveness check | — | `{"status": "ok", "version": "0.1.0"}` | — |
+| GET | `/api/v1/account` | Paper account, buying power, equity | — | `AccountResponse` — see §3.1 | 401, 429, 502 |
+| GET | `/api/v1/positions` | Open positions + unrealized P&L | `symbol?: string` query | `PositionsResponse` — see §3.2 | 401, 429, 502 |
+| GET | `/api/v1/orders` | Recent orders/fills | `status?: open\|closed\|all (default open)`, `limit?: int 1..500 (default 50)`, `symbols?: string` comma list e.g. `AAPL,SPY` | `OrdersResponse` — see §3.3 | 401, 429, 502 |
+| GET | `/api/v1/clock` | Market open/close | — | `ClockResponse` — see §3.4 | 401, 429, 502 |
+| GET | `/get_account` | **Deprecated** — alias to `/api/v1/account` | — | `{"connected": true, "account": {...}}` | 401, 502 |
 
-When a HTTP surface is introduced, all endpoints will live under:
+All `GET`s are idempotent. No request body.
+
+---
+
+## 3. Schemas
+
+### 3.1 GET /api/v1/account — In and Out
+
+**In Schema:** None. Reads server-side credentials.
+
+**Out Schema — 200 `AccountResponse`:**
+```
+{
+  "connected": true,
+  "account": {
+    "id": "4a916b34-...",
+    "account_number": "PA**********",
+    "status": "ACTIVE",
+    "currency": "USD",
+    "cash": "100000",
+    "portfolio_value": "100000",
+    "buying_power": "400000",
+    "options_approved_level": 3,
+    "options_buying_power": "100000",
+    "trading_blocked": false,
+    // ... full alpaca-py Account dump
+  },
+  "ts": "2026-08-29T10:00:00.000Z"
+}
+```
+
+**Errors:**
+- `401 {"detail": "Set ALPACA_API_KEY and ALPACA_API_SECRET in backend/.env"}` — missing credentials
+- `429 {"detail": {"error": "Rate limit exceeded. Retry after 2.38s", "type": "RateLimit", "retry_after": 2.38}}` — bucket empty (25/min)
+- `502 {"detail": {"error": "...", "type": "APIError"}}` — upstream Alpaca error
+
+---
+
+### 3.2 GET /api/v1/positions — In and Out
+
+**In Schema — Query Params:**
+- `symbol?: string` — e.g. `?symbol=AAPL` returns single position or `[]` if none. Omit for all positions.
+
+**Out Schema — 200 `PositionsResponse`:**
+```
+{
+  "count": 1,
+  "positions": [
+    {
+      "symbol": "AAPL",
+      "qty": "10",
+      "avg_entry_price": "140.0",
+      "market_value": "1500.0",
+      "cost_basis": "1400.0",
+      "unrealized_pl": "100.0",
+      "unrealized_plpc": "0.07",
+      // ... full alpaca-py Position dump
+    }
+  ],
+  "symbol_filter": "AAPL" | null,
+  "ts": "2026-08-29T10:00:00.000Z"
+}
+```
+
+**Errors:** Same 401/429/502 as above. `404` for missing symbol is normalized to `200 {"count": 0, "positions": []}`.
+
+---
+
+### 3.3 GET /api/v1/orders — In and Out
+
+**In Schema — Query Params:**
+- `status?: string` — `open` (default) | `closed` | `all` — maps to `QueryOrderStatus`
+- `limit?: int` — 1..500, default 50, clamped
+- `symbols?: string` — comma list, e.g. `?symbols=AAPL,SPY` — filtered post-fetch
+
+**Out Schema — 200 `OrdersResponse`:**
+```
+{
+  "count": 1,
+  "orders": [
+    {
+      "id": "ord-1",
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": "10",
+      "type": "market",
+      "status": "open",
+      "created_at": "2026-08-29T10:00:00Z",
+      "filled_at": null,
+      // ... full alpaca-py Order dump
+    }
+  ],
+  "status_filter": "open",
+  "limit": 50,
+  "symbols_filter": "AAPL,SPY" | null,
+  "ts": "2026-08-29T10:00:00.000Z"
+}
+```
+
+**Errors:** Same 401/429/502. Validation error for `status` outside `open|closed|all` → `422 Unprocessable Entity` from FastAPI.
+
+---
+
+### 3.4 GET /api/v1/clock — In and Out
+
+**In Schema:** None.
+
+**Out Schema — 200 `ClockResponse`:**
+```
+{
+  "is_open": true,
+  "clock": {
+    "is_open": true,
+    "timestamp": "2026-08-29T10:00:00Z",
+    "next_open": "2026-08-30T09:30:00Z",
+    "next_close": "2026-08-29T16:00:00Z"
+  },
+  "ts": "2026-08-29T10:00:00.000Z"
+}
+```
+
+**Errors:** Same 401/429/502.
+
+---
+
+## 4. Error Catalog
+
+| Status | Type | When | Body |
+| :--- | :--- | :--- | :--- |
+| 401 | `AlpacaConnectionError` | Missing `ALPACA_API_KEY`/`ALPACA_API_SECRET` | `{"detail": "Set ALPACA_API_KEY..."}` |
+| 429 | `RateLimit` / `BrokerRateLimitError` | Leaky bucket empty (25/min) or upstream 429 — retry after `retry_after` seconds | `{"detail": {"error": "Rate limit exceeded...", "type": "RateLimit", "retry_after": 2.3}}` |
+| 502 | `APIError` / `Exception` | Upstream 5xx, timeout after 3 retries with backoff+jitter, or unexpected | `{"detail": {"error": "...", "type": "APIError"}}` |
+| 422 | `ValidationError` | Bad query param (e.g. `status=foo`, `limit=9999` without clamp) | FastAPI default `{"detail": [...]}` |
+
+All errors are logged to `broker.jsonl` without secrets.
+
+---
+
+## 5. Rate Limiting and Retry
+
+- **Bucket:** capacity 25, refill 25/60 per second (≈0.416/s). Shared singleton `backend/broker/rate_limit.py:bucket`.
+- **429 handling:** bucket empty → immediate `BrokerRateLimitError` → `429` with `retry_after`. Upstream 429/5xx/timeout → retry up to 3 times with `backoff = 0.5 * 2^attempt ±20% jitter`, capped at 8s.
+- **Header:** No `X-RateLimit` header in v1 — use `retry_after` in `429` body.
+
+---
+
+## 6. cURL Examples
 
 ```
-/api/v1
+# health
+curl http://localhost:8000/health
+
+# account
+curl http://localhost:8000/api/v1/account
+
+# positions (all, or filtered)
+curl http://localhost:8000/api/v1/positions
+curl "http://localhost:8000/api/v1/positions?symbol=AAPL"
+
+# orders
+curl "http://localhost:8000/api/v1/orders"
+curl "http://localhost:8000/api/v1/orders?status=closed&limit=10"
+curl "http://localhost:8000/api/v1/orders?status=all&limit=50&symbols=AAPL,SPY"
+
+# clock
+curl http://localhost:8000/api/v1/clock
+
+# openapi
+curl http://localhost:8000/openapi.json | jq '.paths | keys'
+# ["/get_account","/api/v1/account","/api/v1/positions","/api/v1/orders","/api/v1/clock","/health"]
 ```
 
-No endpoints are active under this prefix in v1.
+---
 
-| Method | Path | Status | Description | In Schema | Out Schema |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| — | — | — | — | — | — |
+## 7. File Map
 
-No rows. This table will be populated only when endpoints are specified and implemented. Do not infer endpoints from the agent or broker internals.
+```
+backend/
+  broker/
+    client.py       # throttled wrapper: get_account(), get_positions(), get_orders(), get_clock()
+    rate_limit.py   # TokenBucket, with_rate_limit(), backoff_delay(), is_retryable_exception()
+  core/
+    models.py       # AccountResponse, PositionsResponse, OrdersResponse, ClockResponse, ErrorResponse
+    logging.py      # JSON-line logger → logs/broker.jsonl
+  app/              # FastAPI host — active in v1 for /api/v1 broker surface (not removed)
+    main.py         # FastAPI(title="Meanrev Alpaca API", version="0.1.0") + include_router(broker)
+    routers/
+      broker.py     # 4 GETs under /api/v1 (active)
+      alpaca.py     # legacy GET /get_account — deprecated alias, remove in v2
+  logs/
+    broker.jsonl    # gitignored, structured audit trail
+```
 
 ---
 
-## 3. External APIs Consumed (Not Exposed By This System)
+## 8. Reserved — Not Implemented in v1
 
-This system does not expose these. It calls them through the broker surface.
+No write endpoints are active. When specified, they will live under `/api/v1` with full In/Out schemas:
 
-- **Alpaca Trading API** — Orders, account, positions, and market data. Accessed exclusively via the throttled alpaca-py wrapper at 25 req/min with exponential backoff and jitter. Paper trading only.
-- **Alpaca MCP Server** — Claude/Cursor/VS Code bridge for paper environment. At least one of MCP Server or CLI must be used per hackathon requirements.
-- **Alpaca CLI** — Terminal JSON output for account and order operations.
+- `POST /api/v1/orders` — submit market/limit/options orders
+- `DELETE /api/v1/orders/{order_id}` — cancel
+- `GET /api/v1/assets/{symbol}` — asset metadata
 
-These are documented by Alpaca and are not part of this system's /api/v1 contract.
-
----
-
-## 4. Future Endpoints — Reserved and Not Implemented
-
-The following are reserved path shapes for a future HTTP surface. They are not implemented, not routed, and not tested in v1. They are listed only to reserve naming and to define the shape that will be used when specified.
-
-All future endpoints will include request and response schemas with field names, types, required flags, and error shapes. Until specified, this section remains a reservation list.
-
-| Method | Path | Purpose (Reserved) | In Schema (Draft) | Out Schema (Draft) | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| GET | /api/v1/account | Return paper account state and buying power | None — reads server-side env | To be specified | Reserved — Not Implemented |
-| GET | /api/v1/positions | Return open positions and unrealized P&L | None | To be specified | Reserved — Not Implemented |
-| POST | /api/v1/orders | Submit a risk-validated order | To be specified | To be specified | Reserved — Not Implemented |
-| GET | /api/v1/orders | List recent orders and fills | Query: to be specified | To be specified | Reserved — Not Implemented |
-| POST | /api/v1/agent/pause | Pause the autonomous loop | To be specified | To be specified | Reserved — Not Implemented |
-| POST | /api/v1/agent/resume | Resume the autonomous loop | To be specified | To be specified | Reserved — Not Implemented |
-| GET | /api/v1/agent/status | Return loop state and last agent verdicts | None | To be specified | Reserved — Not Implemented |
-| GET | /api/v1/report | Generate report from JSON-line log | Query: to be specified | To be specified | Reserved — Not Implemented |
-
-No In Schema or Out Schema is finalized until an endpoint is specified for implementation. When an endpoint is activated, its row will move to §2 and will be documented with full schemas, examples, and error codes.
+These remain empty until you explicitly approve a write surface. This keeps paper P&L safe during the scoring window.
 
 ---
 
-## 5. Schemas — None Active
+## 9. Platform Note — Cash-Settled Index Options Settlement Lag
 
-No request or response schemas are active in v1 because no endpoints are active.
-
-When an endpoint is specified, its schemas will be documented here with:
-
-- Field name, type, required versus optional, and description
-- Validation rules and limits
-- Success response shape with status code
-- Error response shape with status code and error catalog reference
+`GET /api/v1/account` equity on the morning after SPXW/XSP expiry may be understated — settlement posts as an overnight journal entry, sometimes not until ~10:00 a.m. ET next day. Prefer closing index options before expiry so P&L is realized; treat morning-after equity as provisional. Logged distinctions between closed vs held-to-settlement apply.
 
 ---
 
-## 6. Errors — None Active
-
-No HTTP error codes are emitted by this system in v1 because no HTTP surface is exposed.
-
-When a HTTP surface is introduced, errors will be documented per endpoint using a shared error shape and the existing internal catalog covering validation errors, risk rejections, risk scaling, transient broker errors, deterministic broker rejections, circuit-breaker pauses, and stale settlement reads.
-
----
-
-## 7. How to Populate This Document
-
-This document will be populated only when a HTTP endpoint is explicitly specified for build. To add an endpoint:
-
-1. Move its row from §4 to §2
-2. Fill Method, Path under /api/v1, Description, full In Schema, and full Out Schema
-3. Add request and response examples
-4. Add its error codes to §6
-
-Until then, this reference remains empty by design.
-
----
-
-*Source of truth for this decision: DOC.md §1 — No UI is required or wanted, DOC.md §2 — Explicitly removed FastAPI backend, §5 — Backend file architecture with no HTTP layer, and §9 — Submission setup requiring a dedicated paper account. This document will change only when a HTTP API is specified.*
+*Source of truth: DOC.md §5 backend file architecture, §7 safeguards, and the approved broker plan (25 req/min, backoff+jitter, paper-only). This doc updated from "No active endpoints" to active read surface after your approval.*

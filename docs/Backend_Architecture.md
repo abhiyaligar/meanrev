@@ -44,14 +44,16 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 
 | Layer | Component | Role and Notes |
 | :--- | :--- | :--- |
-| Interface | CLI with prompt_toolkit and rich | Claude-Code-style REPL, supports natural language instructions and slash commands, streams agent activity live |
+| Interface | CLI with prompt_toolkit, rich, and questionary | Claude-Code-style REPL, supports natural language instructions and slash commands, streams agent activity live; questionary for interactive prompts (e.g., confirmations, selections) |
 | Orchestration | LangChain and LangGraph | Graph-based state machine, each node is a specialized agent, shared state via pydantic schema |
-| Market Research | Claude 3.5 Sonnet | Macro catalyst monitoring, news and sentiment analysis, regime classification |
-| Strategy and Decision | GPT-4o | Signal synthesis combining sentiment with technical indicators, produces trade parameters |
+| Market Research | `LLM_MODEL_MARKET_RESEARCH` (default `anthropic/claude-3.5-sonnet`) via OpenRouter / Groq / Modal | Macro catalyst monitoring, news and sentiment analysis, regime classification; model ID read from `.env.example` → `.env` selector |
+| Strategy and Decision | `LLM_MODEL_STRATEGY` (default `openai/gpt-4o`) via OpenRouter / Groq / Modal | Signal synthesis combining sentiment with technical indicators, produces trade parameters; model ID read from `.env.example` → `.env` selector |
+| Reporting | `LLM_MODEL_REPORTING` (default `openai/gpt-4o-mini`) via same gateway | Structured log → human-readable summary; model ID read from `.env.example` selector |
+| LLM Provider Gateway | OpenRouter, Groq, or Modal | Provider abstraction — OpenRouter (unified), Groq (fast inference), or Modal (serverless GPU). Selected via `LLM_PROVIDER` env; models via `LLM_MODEL_*` selectors in `.env.example`. Direct keys remain fallback |
 | Risk Management | Deterministic Rules Engine (Python) | Position limits, exposure caps, daily drawdown circuit breaker; ML surrogate deferred to v2 |
 | Broker Integration | alpaca-py (official SDK) | Paper trading only, accessed through a throttled wrapper |
 | Database | PostgreSQL plus TimescaleDB, optional | Deferred in v1; used only if flat-file logs prove insufficient for historical bars and audit history |
-| Caching and Rate Limiting | Redis | Token bucket for execution limiter, optional pub/sub between agent stages |
+| Caching and Rate Limiting | Redis | Token bucket for execution limiter (see §9.1), optional pub/sub between agent stages; configured via REDIS_URL in .env (e.g., redis://localhost:6379/0) |
 | Evaluation | DeepEval with pytest and Promptfoo (Node CLI, separate) | Prompt regression and agent output quality checks, not imported into the application runtime |
 
 **Explicitly excluded in v1:** FastAPI backend service and React plus Tailwind frontend. These were removed after confirmation that a UI is not required and incurs unnecessary scope. The ML surrogate risk model using XGBoost or LSTM over Monte Carlo paths is also excluded from v1 for timeline reasons.
@@ -132,7 +134,7 @@ The data layer is responsible for ensuring these inputs are fresh, aligned, and 
 
 ## 8. Configuration and Environment
 
-- Configuration is loaded from environment variables with support for a local environment file.
+- Configuration is loaded from environment variables with support for a local environment file. LLM provider and model selection are driven by `LLM_PROVIDER` and `LLM_MODEL_*` selectors defined in `.env.example` (single source of truth).
 - A committed example file documents the required keys without containing secrets. The real file is gitignored.
 - Required credentials are an Alpaca paper API key and secret dedicated to the submission account. Live credentials must not be used.
 - The Alpaca API URL is configurable and normalized by the broker layer regardless of whether a version suffix is included.
@@ -146,6 +148,14 @@ The data layer is responsible for ensuring these inputs are fresh, aligned, and 
 - **Optional relational persistence:** PostgreSQL with TimescaleDB is reserved for v2 or for cases where flat-file history becomes insufficient for querying historical bars or long agent histories.
 - **Caching and coordination:** Redis is used for the execution rate limiter token bucket and optionally for publish and subscribe messaging between agent stages. Its usage is limited to operational concerns, not as a primary data store in v1.
 - **No dashboard database:** Since no web frontend exists, there is no backing store for UI state.
+
+### 9.1 Redis Configuration
+
+- **Purpose in v1:** Provide the token-bucket state for the broker rate limiter (25 requests per minute, capacity 25, refill 25/60 per second). The in-process fallback in `backend/broker/rate_limit.py` is the default for local development and single-worker runs; Redis is enabled when `REDIS_URL` is set and multiple workers or a durable bucket across restarts is required.
+- **Connection:** Configured via `REDIS_URL` (for example, `redis://localhost:6379/0`) in the environment file. No Redis secret is committed. When `REDIS_URL` is absent, the system falls back to the in-memory bucket without error.
+- **Rate limiter keys:** `rate_limit:bucket:tokens` and `rate_limit:bucket:ts` with atomic update via Lua or single-command transaction to preserve the 25 per minute guarantee across workers.
+- **Pub/sub (optional):** When enabled, agent stages can publish events such as research completed or risk verdict to `agent:events` for live streaming fan-out. The feature is disabled by default and does not affect correctness of the autonomous loop.
+- **Failure mode:** If Redis is unreachable, the broker surface surfaces a retryable error that is handled with the same exponential backoff and jitter as an upstream 429, and the operator can continue with the in-memory limiter for single-worker operation.
 
 ---
 
@@ -196,6 +206,15 @@ For a hold-to-expiry approach this can mean the entire final day profit and loss
 - **DeepEval with pytest** is used for prompt regression testing and agent output quality checks within the Python workspace.
 - **Promptfoo** is run as a separate Node CLI and is not imported into the application. It provides comparative prompt evaluation without coupling to the runtime.
 - **Priority test coverage:** Broker logic and the risk module receive the highest test priority, since silent bugs in either area can cause incorrect orders or failure of the drawdown guardrail. Other modules are tested opportunistically given the compressed timeline.
+
+### 14.1 Testing Strategy
+
+- **Unit layer — broker:** `backend/broker/rate_limit.py` token bucket refill, consume, retry-after math, and jitter range; `backend/broker/client.py` 25 per minute enforcement, 429 and 5xx retry with backoff, mapping of missing position to empty list, and error translation to 401, 429, and 502. Tests mock `TradingClient` and use `TestClient` against `backend/app/main.py`.
+- **Unit layer — risk:** `backend/agents/risk.py` per-position size limits, exposure caps, daily drawdown circuit breaker threshold including auto-pause and explicit resume, and cash-settled index options handling such as close-before-expiry preference and settlement lag flagging. Verified against account state fixtures with unrealized and realized profit and loss, margin usage, and cash.
+- **Agent output layer:** Strategy and research prompt regression under DeepEval with pytest, asserting token count below one thousand, output schema conformance, and presence of options in every trade decision. Prompt changes are gated on these tests.
+- **Integration layer:** Graph wiring in `backend/graph/build.py` including the conditional risk branch where approved goes to execution and rejected or scaled stops or retries; CLI to graph instruction routing such as status, positions, report, pause, and resume; broker to execution connectivity; data to research and strategy feature flow. Integration tests use a mocked broker and in-memory bucket.
+- **Prompt evaluation layer:** Promptfoo as a separate Node CLI for side-by-side comparison of prompt variants. Results are recorded outside the application and do not affect runtime dependencies.
+- **Configuration and quality:** `pytest.ini` and `pyproject.toml` configure `pytest-asyncio`, `pytest-xdist`, and coverage with `pytest --cov=backend --cov-branch`; minimum branch coverage is enforced for `broker` and `risk` while other modules are allowed to grow. Async tests and parallel workers are enabled. See `docs/TESTING.md` for the full matrix, fixtures, and commands.
 
 ---
 
