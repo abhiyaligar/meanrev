@@ -20,6 +20,8 @@ env/
 .ruff_cache/
 *.log
 venv/
+__pycache__
+*.pyc
 
 # --- Node / frontend ---
 node_modules/

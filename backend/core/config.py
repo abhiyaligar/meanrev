@@ -70,6 +70,16 @@ class Settings(BaseSettings):
         description="Reporting agent model ID — compulsory from .env via .env.example. No hardcoded default.",
     )
 
+    # --- Risk thresholds — deterministic, no hardcoded logic in agents ---
+    risk_max_position_pct: float = Field(default=0.15, alias="RISK_MAX_POSITION_PCT", description="Max single position as fraction of equity (0.15 = 15%)")
+    risk_max_exposure_pct: float = Field(default=0.60, alias="RISK_MAX_EXPOSURE_PCT", description="Max gross exposure as fraction of equity (0.60 = 60%)")
+    risk_daily_drawdown_pct: float = Field(default=0.03, alias="RISK_DAILY_DRAWDOWN_PCT", description="Daily drawdown trigger fraction (0.03 = 3% → auto-pause)")
+    risk_peak_equity: Optional[float] = Field(default=None, alias="RISK_PEAK_EQUITY", description="Peak equity for drawdown calc; if None, uses portfolio_value as peak")
+
+    # --- Execution modes — auto vs HITL ---
+    execution_mode: str = Field(default="auto", alias="EXECUTION_MODE", description="Execution mode: auto (autonomous, no HITL) or hitl (human approval via interrupt)")
+    hitl_enabled: bool = Field(default=False, alias="HITL_ENABLED", description="Enable Human-in-the-Loop for submit_order (requires checkpointer + thread_id)")
+
     # --- Optional infra ---
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
 

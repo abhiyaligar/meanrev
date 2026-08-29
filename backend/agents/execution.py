@@ -74,120 +74,202 @@ def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Extract order type / prices from strategy if provided
+    order_type = str(strategy.get("order_type") or strategy.get("type") or "market").lower()
+    if order_type not in ("market", "limit", "stop"):
+        order_type = "market"
+    limit_price = strategy.get("limit_price") or strategy.get("price")
+    stop_price = strategy.get("stop_price")
+    # Try parse from built-in output string
+    if isinstance(strategy.get("output"), str) and not limit_price:
+        try:
+            import json as _json, re as _re
+
+            m2 = _re.search(r"\{[^}]+\}", strategy["output"])
+            if m2:
+                p2 = _json.loads(m2.group(0))
+                order_type = str(p2.get("order_type") or p2.get("type") or order_type).lower()
+                limit_price = p2.get("limit_price") or p2.get("stop_price") or limit_price
+                stop_price = p2.get("stop_price") or stop_price
+        except Exception:
+            pass
+
     order_payload = {
         "symbol": str(symbol).upper(),
         "qty": qty_val,
         "side": action if action in ("buy", "sell") else "buy",
-        "type": "market",
+        "type": order_type,
+        "limit_price": float(limit_price) if limit_price else None,
+        "stop_price": float(stop_price) if stop_price else None,
         "risk_decision": decision,
         "risk_rule": risk.get("rule"),
     }
 
-    # --- Human-in-the-Loop via built-in interrupt (library, not custom) ---
-    try:
-        from langgraph.types import interrupt
+    # --- Execution mode: auto vs hitl (both via config, no hardcoded) ---
+    from backend.core.config import get_settings
 
-        # This will pause the graph if checkpointer is present and human response is needed.
-        # In offline/stub mode without checkpointer, it will raise or return immediately.
-        human_input = interrupt(
-            {
-                "action": "place_order",
-                "order": order_payload,
-                "description": f"Order pending approval: {order_payload['side']} {order_payload['qty']} {order_payload['symbol']} ({decision}) — risk rule: {risk.get('rule')}",
-                "risk": risk,
-                "strategy": strategy,
-            }
-        )
-        # human_input is the resume value after human approves: e.g., {"decisions": [{"type": "approve"}]} or {"type": "approve"}
-        # Normalize
-        decision_type = None
-        if isinstance(human_input, dict):
-            # Could be {"decisions": [{"type": "approve"}]} or {"type": "approve"}
-            if "decisions" in human_input and isinstance(human_input["decisions"], list) and human_input["decisions"]:
-                decision_type = str(human_input["decisions"][0].get("type", "")).lower()
-            elif "type" in human_input:
-                decision_type = str(human_input["type"]).lower()
-            elif "approve" in str(human_input).lower():
-                decision_type = "approve"
-            elif "reject" in str(human_input).lower():
-                decision_type = "reject"
+    cfg = get_settings()
+    mode = str(getattr(cfg, "execution_mode", "auto")).lower()
+    hitl_enabled = bool(getattr(cfg, "hitl_enabled", False))
 
-        if decision_type == "reject":
-            log_event("execution_rejected_by_human", symbol=order_payload["symbol"], qty=qty_val)
-            state["execution"] = {
-                "status": "rejected_by_human",
-                "order": order_payload,
-                "human_decision": "reject",
-                "stub": False,
-            }
-            return state
-        if decision_type == "edit" and isinstance(human_input, dict):
-            # Human edited the order — apply edits if provided
-            edited = None
-            if "decisions" in human_input:
-                edited = human_input["decisions"][0].get("editedAction") or human_input["decisions"][0].get("edited_action")
-            if edited and isinstance(edited, dict):
-                order_payload.update({k: v for k, v in edited.items() if k in ("symbol", "qty", "side", "type")})
-                if "qty" in edited:
-                    try:
-                        order_payload["qty"] = float(edited["qty"])
-                    except Exception:
-                        pass
-            log_event("execution_edited_by_human", symbol=order_payload["symbol"], edited=edited)
+    should_hitl = hitl_enabled and mode == "hitl"
+
+    if should_hitl:
+        # Human-in-the-Loop via built-in interrupt (library, not custom) — only in hitl mode
+        try:
+            from langgraph.types import interrupt
+
+            human_input = interrupt(
+                {
+                    "action": "place_order",
+                    "order": order_payload,
+                    "description": f"Order pending approval: {order_payload['side']} {order_payload['qty']} {order_payload['symbol']} ({decision}) [{order_type}] — risk rule: {risk.get('rule')}",
+                    "risk": risk,
+                    "strategy": strategy,
+                }
+            )
+            # human_input is the resume value after human approves: e.g., {"decisions": [{"type": "approve"}]} or {"type": "approve"}
+            # Normalize
+            decision_type = None
+            if isinstance(human_input, dict):
+                # Could be {"decisions": [{"type": "approve"}]} or {"type": "approve"}
+                if "decisions" in human_input and isinstance(human_input["decisions"], list) and human_input["decisions"]:
+                    decision_type = str(human_input["decisions"][0].get("type", "")).lower()
+                elif "type" in human_input:
+                    decision_type = str(human_input["type"]).lower()
+                elif "approve" in str(human_input).lower():
+                    decision_type = "approve"
+                elif "reject" in str(human_input).lower():
+                    decision_type = "reject"
+
+            if decision_type == "reject":
+                log_event("execution_rejected_by_human", symbol=order_payload["symbol"], qty=qty_val)
+                state["execution"] = {
+                    "status": "rejected_by_human",
+                    "order": order_payload,
+                    "human_decision": "reject",
+                    "stub": False,
+                }
+                return state
+            if decision_type == "edit" and isinstance(human_input, dict):
+                # Human edited the order — apply edits if provided
+                edited = None
+                if "decisions" in human_input:
+                    edited = human_input["decisions"][0].get("editedAction") or human_input["decisions"][0].get("edited_action")
+                if edited and isinstance(edited, dict):
+                    order_payload.update({k: v for k, v in edited.items() if k in ("symbol", "qty", "side", "type")})
+                    if "qty" in edited:
+                        try:
+                            order_payload["qty"] = float(edited["qty"])
+                        except Exception:
+                            pass
+                log_event("execution_edited_by_human", symbol=order_payload["symbol"], edited=edited)
 
         # Approved (or edited then approved) — proceed to submit via throttled broker
-        log_event("execution_approved_by_human", symbol=order_payload["symbol"], qty=order_payload["qty"])
+            log_event("execution_approved_by_human", symbol=order_payload["symbol"], qty=order_payload["qty"])
 
-    except Exception as e:
-        # If interrupt not available (no checkpointer, offline, or stub mode), fallback to dry-run with log
-        # Don't fail the graph — return dry-run so pipeline remains runnable offline
-        if "interrupt" in str(type(e).__name__).lower() or "GraphInterrupt" in str(e) or "No checkpointer" in str(e):
-            log_event("execution_hitl_no_checkpointer", level="warning", error=str(e)[:200])
-        else:
-            # Check if it's the actual interrupt pause signal — re-raise to let LangGraph handle it
-            if "interrupt" in str(e).lower() or e.__class__.__name__ in ("GraphInterrupt", "Interrupt"):
-                raise
-            log_event("execution_hitl_error", level="warning", error=str(e)[:200])
-        # In dry-run/offline, treat as auto-approved for testing unless risk was scaled/rejected
-        # But log that it was not human-approved
-        state["execution"] = {
-            "status": "dry_run_no_hitl",
-            "order": order_payload,
-            "note": "No checkpointer / HITL not available — dry-run only, no live order placed. Wire checkpointer + thread_id for real HITL.",
-            "stub": False,
-        }
-        # Still attempt throttled dry-run via submit_order tool for audit
-        try:
-            from backend.tools.broker_tools import submit_order
-
-            dry = submit_order.invoke({"symbol": order_payload["symbol"], "qty": order_payload["qty"], "side": order_payload["side"]})
-            state["execution"]["dry_run_result"] = dry[:500]
-        except Exception:
-            pass
-        return state
-
-    # --- If human approved, submit via throttled broker (dry-run in Phase 7, live in production) ---
-    try:
-        from backend.tools.broker_tools import submit_order
-
-        result = submit_order.invoke(
-            {
-                "symbol": order_payload["symbol"],
-                "qty": order_payload["qty"],
-                "side": order_payload["side"],
-                "order_type": order_payload["type"],
+        except Exception as e:
+            # If interrupt not available (no checkpointer, offline, or stub mode), fallback to dry-run with log
+            # Don't fail the graph — return dry-run so pipeline remains runnable offline
+            if "interrupt" in str(type(e).__name__).lower() or "GraphInterrupt" in str(e) or "No checkpointer" in str(e):
+                log_event("execution_hitl_no_checkpointer", level="warning", error=str(e)[:200])
+            else:
+                # Check if it's the actual interrupt pause signal — re-raise to let LangGraph handle it
+                if "interrupt" in str(e).lower() or e.__class__.__name__ in ("GraphInterrupt", "Interrupt"):
+                    raise
+                log_event("execution_hitl_error", level="warning", error=str(e)[:200])
+            # In dry-run/offline, treat as auto-approved for testing unless risk was scaled/rejected
+            # But log that it was not human-approved
+            state["execution"] = {
+                "status": "dry_run_no_hitl",
+                "order": order_payload,
+                "note": "No checkpointer / HITL not available — dry-run only, no live order placed. Wire checkpointer + thread_id for real HITL.",
+                "stub": False,
             }
+            # Still attempt throttled dry-run via submit_order tool for audit
+            try:
+                from backend.tools.broker_tools import submit_order
+
+                dry = submit_order.invoke({"symbol": order_payload["symbol"], "qty": order_payload["qty"], "side": order_payload["side"]})
+                state["execution"]["dry_run_result"] = dry[:500]
+            except Exception:
+                pass
+            return state
+
+    # --- Submit via throttled broker (real) — handles market/limit/stop/options, 25/min, 30s timeout, tenacity ---
+    # For auto mode, this is direct; for hitl mode, this is after human approve
+    import time
+
+    start = time.monotonic()
+    try:
+        from backend.broker.client import submit_order as broker_submit_order
+
+        order_type = order_payload.get("type", "market")
+        result = broker_submit_order(
+            symbol=order_payload["symbol"],
+            qty=order_payload["qty"],
+            side=order_payload["side"],
+            order_type=order_type,
+            limit_price=order_payload.get("limit_price"),
+            stop_price=order_payload.get("stop_price"),
         )
+        latency_ms = (time.monotonic() - start) * 1000
+        # Parse fill info
+        order_id = result.get("id") or result.get("order_id") or "unknown"
+        status = str(result.get("status", "submitted")).lower()
+        filled_qty = result.get("filled_qty") or result.get("filled_avg_price") or result.get("qty")
+        # Determine status bucket
+        if status in ("filled", "partially_filled", "partially_filled"):
+            exec_status = "filled" if status == "filled" else "partial_fill"
+        elif status in ("rejected", "canceled", "cancelled", "expired"):
+            exec_status = "rejected"
+        elif "filled" in status:
+            exec_status = "filled"
+        else:
+            exec_status = "submitted_awaiting_fill"
+
         state["execution"] = {
-            "status": "submitted_awaiting_fill" if "dry_run" not in result else "dry_run_approved",
+            "status": exec_status,
             "order": order_payload,
-            "broker_result": result[:800] if isinstance(result, str) else str(result)[:800],
-            "human_approved": True,
+            "order_id": order_id,
+            "filled_qty": filled_qty,
+            "filled_price": result.get("filled_avg_price") or result.get("filled_price") or result.get("limit_price"),
+            "latency_ms": round(latency_ms, 2),
+            "broker_result": str(result)[:800],
+            "human_approved": should_hitl,  # True if hitl mode and approved, False if auto
+            "auto": not should_hitl,
             "stub": False,
         }
-        log_event("execution_submitted", symbol=order_payload["symbol"], qty=order_payload["qty"], result=result[:200] if isinstance(result, str) else str(result)[:200])
+        log_event(
+            "execution_submitted" if exec_status in ("filled", "submitted_awaiting_fill") else "execution_" + exec_status,
+            symbol=order_payload["symbol"],
+            qty=order_payload["qty"],
+            order_type=order_type,
+            order_id=order_id,
+            latency_ms=round(latency_ms, 2),
+            status=exec_status,
+            **({"filled_qty": filled_qty} if filled_qty else {}),
+        )
+        if exec_status == "partial_fill":
+            log_event("execution_partial_fill", order_id=order_id, filled_qty=filled_qty, symbol=order_payload["symbol"])
+        elif exec_status == "rejected":
+            log_event("execution_rejected", order_id=order_id, reason=result.get("status") or result.get("error"))
+
     except Exception as e:
-        state["execution"] = {"status": "submit_failed", "order": order_payload, "error": str(e)[:300], "stub": False}
-        log_event("execution_submit_failed", level="warning", error=str(e)[:200])
+        latency_ms = (time.monotonic() - start) * 1000
+        # Check if it's timeout/429 via tenacity — will have been retried
+        err_msg = str(e)[:500]
+        is_timeout = "timeout" in err_msg.lower() or "timed out" in err_msg.lower()
+        is_429 = "429" in err_msg or "rate limit" in err_msg.lower()
+        status = "timeout" if is_timeout else "rate_limited" if is_429 else "submit_failed"
+        state["execution"] = {
+            "status": status,
+            "order": order_payload,
+            "error": err_msg[:300],
+            "latency_ms": round(latency_ms, 2),
+            "stub": False,
+        }
+        log_event("execution_submit_failed" if status == "submit_failed" else f"execution_{status}", level="warning", error=err_msg[:200], latency_ms=round(latency_ms, 2))
+        # Tenacity already retried; no further retry here
 
     return state

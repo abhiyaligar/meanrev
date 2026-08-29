@@ -206,3 +206,109 @@ def get_clock() -> Dict[str, Any]:
         return _dump(clock)
 
     return _call_with_retry(_do)
+
+
+def submit_order(
+    symbol: str,
+    qty: float,
+    side: str = "buy",
+    order_type: str = "market",
+    limit_price: Optional[float] = None,
+    stop_price: Optional[float] = None,
+    time_in_force: str = "day",
+) -> Dict[str, Any]:
+    """
+    Submit a paper order — throttled, 30s timeout, tenacity retry.
+    Supports market, limit, stop, and options single-leg (via same Market/Limit with option symbol).
+    Symbol is normalized to upper; qty clamped >0; side buy|sell; order_type market|limit|stop.
+    Returns dumped order dict.
+    """
+    sym = normalize_symbol(symbol)
+    if not sym:
+        raise ValueError("symbol required for submit_order")
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        raise ValueError(f"qty {qty!r} must be numeric >0")
+    if q <= 0:
+        raise ValueError("qty must be >0")
+
+    sd = side.strip().lower() if side else "buy"
+    if sd not in ("buy", "sell"):
+        sd = "buy"
+    ot = order_type.strip().lower() if order_type else "market"
+    if ot not in ("market", "limit", "stop"):
+        ot = "market"
+    tif = time_in_force.strip().lower() if time_in_force else "day"
+    # Map tif string to alpaca enum via lower
+    # Alpaca TimeInForce: Day, GTC, OPG, CLS, IOC, FOK
+    tif_map = {"day": "day", "gtc": "gtc", "opg": "opg", "cls": "cls", "ioc": "ioc", "fok": "fok"}
+    tif_val = tif_map.get(tif, "day")
+
+    def _do():
+        client = _create_trading_client()
+        # Lazy imports to avoid circular
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, StopOrderRequest
+
+        side_enum = OrderSide.BUY if sd == "buy" else OrderSide.SELL
+        # Map tif string to enum
+        tif_enum = {
+            "day": TimeInForce.DAY,
+            "gtc": TimeInForce.GTC,
+            "opg": TimeInForce.OPG,
+            "cls": TimeInForce.CLS,
+            "ioc": TimeInForce.IOC,
+            "fok": TimeInForce.FOK,
+        }.get(tif_val, TimeInForce.DAY)
+
+        # Detect option symbol heuristic: contains expiry + C/P + strike (e.g., AAPL240830C00150000) or SPXW family
+        is_option = len(sym) > 12 and any(c in sym for c in ("C", "P")) or _is_option_symbol(sym)
+
+        # Build request — amount of qty: for stocks, qty is shares (float allowed), for options, qty is contracts (int)
+        # Alpaca expects int for options, but float is ok for stocks; we cast to int if option
+        order_qty = int(q) if is_option else q
+
+        if ot == "limit":
+            if limit_price is None or limit_price <= 0:
+                raise ValueError("limit_price required >0 for limit orders")
+            req = LimitOrderRequest(
+                symbol=sym,
+                qty=order_qty,
+                side=side_enum,
+                time_in_force=tif_enum,
+                limit_price=float(limit_price),
+            )
+        elif ot == "stop":
+            if stop_price is None or stop_price <= 0:
+                raise ValueError("stop_price required >0 for stop orders")
+            req = StopOrderRequest(
+                symbol=sym,
+                qty=order_qty,
+                side=side_enum,
+                time_in_force=tif_enum,
+                stop_price=float(stop_price),
+            )
+        else:
+            req = MarketOrderRequest(
+                symbol=sym,
+                qty=order_qty,
+                side=side_enum,
+                time_in_force=tif_enum,
+            )
+
+        order = client.submit_order(order_data=req)
+        return _dump(order)
+
+    return _call_with_retry(_do)
+
+
+def _is_option_symbol(sym: str) -> bool:
+    """Heuristic for option symbol vs equity: option symbols are long and contain date+strike, or SPXW family."""
+    s = sym.upper()
+    if s.startswith(("SPXW", "XSP", "SPX", "NDX", "RUT")):
+        return True
+    # Typical OCC option symbol: AAPL + 6-digit date + C/P + 8-digit strike -> len >= 15
+    if len(s) >= 15 and s[-9:-1].isdigit():
+        return True
+    return False
