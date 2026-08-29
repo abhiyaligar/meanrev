@@ -7,7 +7,7 @@ All tools respect 25/min bucket, 30s timeout, and LLM_MODEL_* selectors from cor
 """
 
 from .broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
-from .market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
+from .market_tools import align_timeframes_tool, detect_arbitrage, get_market_snapshot, get_ohlcv, get_option_chain
 from .news_tools import extract_keywords, fetch_news, get_macro_calendar
 
 # Flat list for create_agent(tools=TOOLS)
@@ -21,6 +21,7 @@ TOOLS = [
     get_market_snapshot,
     get_option_chain,
     align_timeframes_tool,
+    detect_arbitrage,
     fetch_news,
     get_macro_calendar,
     extract_keywords,
@@ -30,7 +31,7 @@ TOOLS = [
 BROKER_TOOLS = [get_account, get_positions, get_orders, get_clock]
 # Sensitive write tools — require HumanInTheLoopMiddleware
 BROKER_WRITE_TOOLS = [submit_order]
-MARKET_TOOLS = [get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool]
+MARKET_TOOLS = [get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage]
 NEWS_TOOLS = [fetch_news, get_macro_calendar, extract_keywords]
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "get_market_snapshot",
     "get_option_chain",
     "align_timeframes_tool",
+    "detect_arbitrage",
     "fetch_news",
     "get_macro_calendar",
     "extract_keywords",

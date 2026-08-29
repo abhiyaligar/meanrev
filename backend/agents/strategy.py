@@ -19,9 +19,9 @@ from backend.core.logging import log_event
 from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
-from backend.tools.market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
+from backend.tools.market_tools import align_timeframes_tool, detect_arbitrage, get_market_snapshot, get_ohlcv, get_option_chain
 
-# HITL per docs: interrupt on sensitive write tool submit_order, reads auto-approved
+# HITL per docs: interrupt on sensitive write tool submit_order, reads auto-approved; detect_arbitrage is read-only
 _HITL_MIDDLEWARE = HumanInTheLoopMiddleware(
     interrupt_on={
         "submit_order": {"allowed_decisions": ["approve", "edit", "reject"]},
@@ -33,6 +33,7 @@ _HITL_MIDDLEWARE = HumanInTheLoopMiddleware(
         "get_market_snapshot": False,
         "get_option_chain": False,
         "align_timeframes_tool": False,
+        "detect_arbitrage": False,
     },
     description_prefix="Order submission pending human approval",
 )
@@ -206,7 +207,7 @@ def get_strategy_agent(checkpointer=None):
 
         return create_agent(
             model=_model_id(),
-            tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock, submit_order],
+            tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage, get_account, get_positions, get_orders, get_clock, submit_order],
             system_prompt=STRATEGY_SYSTEM_PROMPT,
             middleware=_MIDDLEWARE,
             checkpointer=checkpointer,
@@ -237,7 +238,7 @@ def get_strategy_agent(checkpointer=None):
                         checkpointer = None
                 return create_agent(
                     model=fallback,
-                    tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock, submit_order],
+                    tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage, get_account, get_positions, get_orders, get_clock, submit_order],
                     system_prompt=STRATEGY_SYSTEM_PROMPT,
                     middleware=_MIDDLEWARE,
                     checkpointer=checkpointer,
