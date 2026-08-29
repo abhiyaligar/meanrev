@@ -6,7 +6,7 @@
 **Official scoring window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Paper account starting balance for judging:** 100,000 dollars in a new dedicated paper account  
 **Evaluation focus:** Total equity change during the scoring window plus creativity, autonomy, and robustness of the agent workflow. Profit and loss matters but is not the sole factor. A user interface is not required per Alpaca.  
-**Last Updated:** Phase 9 — Strategy `count_tokens<1000` via `tiktoken`, options guarantee, `ATR` sizing, instruction hook; Risk `RISK_MAX_*` + circuit breaker; Execution `auto` vs `hitl` + `submit_order` `market/limit/stop/options`; Reporting 5-section + export; `System_Prompt` central + `utils` DRY
+**Last Updated:** Phase 11 + `meanrev` single command — `pyproject.toml` + `meanrev`/`meanrev.bat` + `How_To_use.md` flag table; prior: Phase 9 Strategy `count_tokens<1000` + options + `ATR` sizing + instruction hook; Risk `RISK_MAX_*` + breaker; Execution `auto` vs `hitl` + `submit_order`; Reporting 5-section + export; `System_Prompt` central + `utils` DRY
 
 ---
 

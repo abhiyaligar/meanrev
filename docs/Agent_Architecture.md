@@ -4,7 +4,7 @@
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Orchestration:** LangChain `create_agent` (built-in) + LangGraph `StateGraph` + `HumanInTheLoopMiddleware` + `ToolCallLimitMiddleware`  
 **Interface:** CLI only — no web frontend.  
-**Last Updated:** Phase 9 — Strategy `count_tokens<1000` via `tiktoken`, `options` guarantee, `ATR` sizing, `instruction` hook (`conservative` 0.5 / `aggressive` 1.5); Reporting deterministic + LLM with 5-section narrative; HITL execution `auto` vs `hitl` modes
+**Last Updated:** Phase 11 + `meanrev` single command — CLI `meanrev` via `pyproject.toml` + `meanrev.bat`/`meanrev` wrappers + `How_To_use.md` flag table; prior: Phase 9 Strategy `count_tokens<1000`, `options` guarantee, `ATR` sizing, `instruction` hook; Reporting deterministic + LLM; HITL `auto` vs `hitl`
 
 ---
 

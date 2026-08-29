@@ -3,7 +3,7 @@
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Principle:** No UI, autonomous agent workflow only. Risk v1 is deterministic rule-based. ML surrogate risk is deferred to v2.  
-**Last Updated:** Phase 9 — Strategy ATR sizing, token counter, options guarantee, HITL execution modes, Risk Phase 6, Reporting Phase 8, Tools + System_Prompt centralization, utils deduplication
+**Last Updated:** Phase 11 + Single Command `meanrev` — CLI `meanrev` like `claude`/`codex` via `pyproject.toml` + `meanrev.bat`/`meanrev` wrappers + `How_To_use.md`; prior: Phase 9 Strategy ATR sizing, token counter, HITL, Phase 8 Reporting, Phase 6 Risk, Tools + System_Prompt + utils
 
 ---
 
@@ -77,7 +77,7 @@ The project is structured around the agent graph, not generic feature folders.
 - **tools:** LangChain `@tool` wrappers (`broker_tools`, `market_tools`, `news_tools`) — 12 tools total, all respect `25/min` + `30s` timeout, `submit_order` is HITL-protected.
 - **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
 - **logs:** Gitignored directory for JSON-line output (`broker.jsonl`, `.paused` flag for circuit breaker) that serves as the authoritative audit trail.
-- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`), ignore rules, and Python project manifest.
+- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`), ignore rules, Python project manifest (`pyproject.toml` with `meanrev` entry), and single-command wrappers (`meanrev`, `meanrev.bat`).
 
 This layout ensures that a change to risk logic, execution throttling, or strategy prompting is isolated to a single directory with a clear ownership boundary.
 
@@ -87,10 +87,10 @@ This layout ensures that a change to risk logic, execution throttling, or strate
 
 ### 6.1 CLI Layer
 
-- Provides an interactive REPL that remains open for the operator while agents run.
+- Provides an interactive REPL that remains open for the operator while agents run. Single entry `meanrev` (via `pyproject.toml` `[project.scripts]` → `venv/Scripts/meanrev.exe`, plus `meanrev.bat`/`meanrev` wrappers) like `claude`/`codex` — `meanrev --mode auto --thread-id scoring-0831` or `python -m backend.cli`.
 - Routes natural-language input to the agent graph as instructions and routes slash commands to direct handlers.
-- Streams agent steps live to the terminal while the same events are persisted to the structured log.
-- Exposes commands for operational control and inspection without requiring a browser or dashboard.
+- Streams agent steps live to the terminal via `rich.live.Live` while the same events are persisted to the structured log.
+- Exposes commands for operational control and inspection without requiring a browser or dashboard — see `How_To_use.md` for flag table (`--mode`, `--thread-id`, `--symbol`, `--dry-run`).
 
 ### 6.2 Orchestration Layer
 
