@@ -8,16 +8,24 @@ All Alpaca Trading API access funnels here.
 - Never logs or returns secrets
 """
 
-import time
+import logging
 import concurrent.futures
 from typing import Any, Dict, List, Optional
+
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
 
+from backend.broker.rate_limit import MAX_RETRIES, RateLimitExceeded, bucket, is_retryable_exception
 from backend.core.config import get_settings
-from backend.broker.rate_limit import bucket, RateLimitExceeded, backoff_delay, is_retryable_exception, MAX_RETRIES
 
 
 class AlpacaConnectionError(Exception):
@@ -64,49 +72,48 @@ def _dump_list(objs: List[Any]) -> List[Dict[str, Any]]:
 
 
 def _run_with_timeout(fn, timeout: float = 30.0, *args, **kwargs):
-    """Run fn with a hard timeout (default 30s) to avoid hung worker threads."""
+    """Run fn with a hard timeout (default 30s) to avoid hung worker threads — library-backed via concurrent.futures."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(fn, *args, **kwargs)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError as e:
-            # Cancel best-effort
             future.cancel()
             raise TimeoutError(f"Alpaca call timed out after {timeout}s") from e
 
 
+_logger = logging.getLogger(__name__)
+
+
+def _tenacity_retry_predicate(exc: BaseException) -> bool:
+    """For tenacity: retry only retryable, never on RateLimitExceeded/BrokerRateLimitError/AlpacaConnectionError."""
+    if isinstance(exc, (RateLimitExceeded, BrokerRateLimitError, AlpacaConnectionError)):
+        return False
+    return is_retryable_exception(exc)  # type: ignore[arg-type]
+
+
 def _call_with_retry(fn, *args, timeout: float = 30.0, **kwargs):
     """
-    Wrapper: consume token, call fn with timeout, retry on retryable with backoff.
-    RateLimitExceeded from bucket → immediate BrokerRateLimitError (no retry).
-    timeout: per-request timeout in seconds (default 30s) per VULN 3 fix.
+    Wrapper: consume token, call fn with timeout, retry on retryable via tenacity (library) instead of custom loop.
+    Uses tenacity.wait_exponential_jitter + stop_after_attempt + retry_if_exception.
+    RateLimitExceeded → immediate BrokerRateLimitError (no retry).
     """
     try:
         bucket.consume(1)
     except RateLimitExceeded as e:
         raise BrokerRateLimitError(str(e), retry_after=e.retry_after)
 
-    last_exc: Optional[Exception] = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            return _run_with_timeout(fn, timeout, *args, **kwargs)
-        except BrokerRateLimitError:
-            raise
-        except AlpacaConnectionError:
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= MAX_RETRIES or not is_retryable_exception(exc):
-                raise
-            # Check if it's an upstream 429 with retry_after
-            retry_after = getattr(exc, "retry_after", None)
-            if retry_after is None and "429" in str(exc):
-                retry_after = backoff_delay(attempt)
-            else:
-                retry_after = backoff_delay(attempt)
-            time.sleep(retry_after)
-    # exhausted retries
-    raise last_exc  # type: ignore
+    @retry(
+        stop=stop_after_attempt(MAX_RETRIES + 1),
+        wait=wait_exponential_jitter(initial=0.5, max=8, jitter=2),
+        retry=retry_if_exception(_tenacity_retry_predicate),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
+        reraise=True,
+    )
+    def _do_with_tenacity():
+        return _run_with_timeout(fn, timeout, *args, **kwargs)
+
+    return _do_with_tenacity()
 
 
 # --- Public broker surface ---

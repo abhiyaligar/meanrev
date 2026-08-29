@@ -10,12 +10,12 @@ Docs: https://docs.langchain.com/oss/python/releases/langchain-v1#create_agent
 """
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolCallLimitMiddleware, wrap_tool_call
+from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolCallLimitMiddleware, wrap_tool_call
 from langchain.messages import ToolMessage
 
 from backend.core.config import get_settings
 from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
-from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions
+from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
 from backend.tools.market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
 
 
@@ -27,7 +27,23 @@ def _handle_tool_errors(request, handler):
         return ToolMessage(content=f"Tool error: Please check input and try again. ({str(e)})", tool_call_id=request.tool_call["id"])
 
 
-_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), _handle_tool_errors]
+# HITL per docs: interrupt on sensitive write tool submit_order (requires approve/edit/reject), reads auto-approved
+_HITL_MIDDLEWARE = HumanInTheLoopMiddleware(
+    interrupt_on={
+        "submit_order": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "get_account": False,
+        "get_positions": False,
+        "get_orders": False,
+        "get_clock": False,
+        "get_ohlcv": False,
+        "get_market_snapshot": False,
+        "get_option_chain": False,
+        "align_timeframes_tool": False,
+    },
+    description_prefix="Order submission pending human approval",
+)
+
+_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), _handle_tool_errors, _HITL_MIDDLEWARE]
 
 
 def _model_id() -> str:
@@ -42,17 +58,26 @@ def _model_id() -> str:
         return f"missing:{str(e)[:60]}"
 
 
-def get_strategy_agent():
+def get_strategy_agent(checkpointer=None):
     """
-    Factory — returns built-in LangChain agent per docs.
-    Handles missing provider package via fallback init_chat_model.
+    Factory — returns built-in LangChain agent per docs with HITL for submit_order.
+    Uses InMemorySaver if no checkpointer provided (required for HITL to persist across interrupts).
     """
     try:
+        if checkpointer is None:
+            try:
+                from langgraph.checkpoint.memory import InMemorySaver
+
+                checkpointer = InMemorySaver()
+            except Exception:
+                checkpointer = None
+
         return create_agent(
             model=_model_id(),
-            tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock],
+            tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock, submit_order],
             system_prompt=STRATEGY_SYSTEM_PROMPT,
             middleware=_MIDDLEWARE,
+            checkpointer=checkpointer,
         )
     except Exception as e:
         if "langchain-openrouter" in str(e) or "langchain-groq" in str(e).lower():
@@ -71,11 +96,19 @@ def get_strategy_agent():
                     base_url=cfg.get("base_url"),
                     temperature=0.5,
                 )
+                if checkpointer is None:
+                    try:
+                        from langgraph.checkpoint.memory import InMemorySaver
+
+                        checkpointer = InMemorySaver()
+                    except Exception:
+                        checkpointer = None
                 return create_agent(
                     model=fallback,
-                    tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock],
+                    tools=[get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, get_account, get_positions, get_orders, get_clock, submit_order],
                     system_prompt=STRATEGY_SYSTEM_PROMPT,
                     middleware=_MIDDLEWARE,
+                    checkpointer=checkpointer,
                 )
             except Exception as e2:
                 from backend.core.logging import log_event

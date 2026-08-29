@@ -336,13 +336,26 @@ def _black_scholes_greeks(
     if spot <= 0 or strike <= 0 or time_to_expiry_years <= 0 or volatility <= 0:
         return {"delta": 0.5 if option_type == "call" else -0.5, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
     try:
-        from math import erf, exp, log, sqrt
+        from math import exp, log, sqrt
 
-        def _norm_cdf(x):
-            return 0.5 * (1 + erf(x / sqrt(2)))
+        # Use scipy.stats.norm when available (library-backed, more accurate), else math.erf fallback
+        try:
+            from scipy.stats import norm  # type: ignore
 
-        def _norm_pdf(x):
-            return exp(-0.5 * x * x) / sqrt(2 * math.pi)
+            def _norm_cdf(x):
+                return float(norm.cdf(x))
+
+            def _norm_pdf(x):
+                return float(norm.pdf(x))
+
+        except ImportError:
+            from math import erf
+
+            def _norm_cdf(x):
+                return 0.5 * (1 + erf(x / sqrt(2)))
+
+            def _norm_pdf(x):
+                return exp(-0.5 * x * x) / sqrt(2 * math.pi)
 
         d1 = (log(spot / strike) + (risk_free_rate + 0.5 * volatility**2) * time_to_expiry_years) / (volatility * sqrt(time_to_expiry_years))
         d2 = d1 - volatility * sqrt(time_to_expiry_years)

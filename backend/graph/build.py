@@ -18,7 +18,7 @@ from typing import Any, Dict
 
 from backend.core.config import get_settings
 from backend.core.logging import log_event
-from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, GRAPH_STRATEGY_PROMPT_TEMPLATE, REPORTING_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT, STRATEGY_SYSTEM_PROMPT
+from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, GRAPH_STRATEGY_PROMPT_TEMPLATE
 
 
 def _model_id(agent: str) -> str:
@@ -105,14 +105,24 @@ def build_graph(checkpointer=None):
             return execution_agent(state)
 
         def risk_router(state: Dict[str, Any]) -> str:
-            decision = state.get("risk", {}).get("decision", "no_trade")
-            return "execution" if decision == "approved" else "end"
+            """
+            Conditional per PHASES.md Phase 5: approved → execution, approved_scaled → execution, rejected → end.
+            Retry is handled via strategy re-invoke if retry_count < max (reserved for v2).
+            """
+            risk = state.get("risk", {}) or {}
+            decision = str(risk.get("decision", "no_trade")).lower()
+            if decision in ("approved", "approved_scaled"):
+                return "execution"
+            # rejected, no_trade, or unknown → stop (or retry in future if retry_count < 1)
+            return "end"
 
         graph = StateGraph(GraphState)
         graph.add_node("research", research_node)
         graph.add_node("strategy", strategy_node)
         graph.add_node("risk", risk_node)
         graph.add_node("execution", execution_node)
+        # Reporting is on-demand via CLI /report (not per-cycle per DOC.md), but register for completeness
+        # graph.add_node("reporting", reporting_node)  # reserved for Phase 8
 
         graph.add_edge(START, "research")
         graph.add_edge("research", "strategy")
@@ -130,11 +140,11 @@ def build_graph(checkpointer=None):
 
 
 def _build_stub_graph():
-    """Deterministic stub chain (no LLM) — always importable per VULN 5."""
-    from backend.agents.research import research_agent
-    from backend.agents.strategy import strategy_agent
-    from backend.agents.risk import risk_agent
+    """Deterministic stub chain (no LLM) — always importable per VULN 5. Mirrors StateGraph logic."""
     from backend.agents.execution import execution_agent
+    from backend.agents.research import research_agent
+    from backend.agents.risk import risk_agent
+    from backend.agents.strategy import strategy_agent
 
     def _stub_graph(state: dict | None = None, *args, **kwargs) -> dict:
         # Accept *args/**kwargs for compat with compiled graph .invoke(state, config={...})
@@ -143,7 +153,8 @@ def _build_stub_graph():
         s = research_agent(s)
         s = strategy_agent(s)
         s = risk_agent(s)
-        if s.get("risk", {}).get("decision") == "approved":
+        decision = str(s.get("risk", {}).get("decision", "")).lower()
+        if decision in ("approved", "approved_scaled"):
             s = execution_agent(s)
         return s
 
