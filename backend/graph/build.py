@@ -79,17 +79,135 @@ def build_graph(checkpointer=None):
                 # Fallback via get
                 return {k: s.get(k) for k in ("messages", "research", "strategy", "risk", "execution", "market_snapshot", "account_state", "reporting_context") if s.get(k) is not None}
 
+        def _human_research_summary(content: str, research_dict: Dict[str, Any]) -> str:
+            """Build human readable research summary from validated output."""
+            try:
+                # Try to parse JSON from content
+                import json, re
+
+                # Extract sentiment/regime/catalyst if research_dict has them
+                sentiment = research_dict.get("sentiment") or "neutral"
+                regime = research_dict.get("regime") or "neutral"
+                catalyst = research_dict.get("catalyst_summary") or research_dict.get("summary") or ""
+                if not catalyst and content:
+                    # Try to extract from raw content
+                    m = re.search(r"\{[^}]+\}", content, re.DOTALL)
+                    if m:
+                        try:
+                            j = json.loads(m.group(0))
+                            sentiment = j.get("sentiment", sentiment)
+                            regime = j.get("regime", regime)
+                            catalyst = j.get("catalyst_summary", catalyst)
+                        except Exception:
+                            pass
+                    if not catalyst:
+                        # Strip code fences and take first 300 chars of content
+                        clean = re.sub(r"```[a-z]*\n?", "", content).replace("```", "").strip()
+                        # Remove JSON braces artifacts
+                        clean = clean.replace("{", "").replace("}", "").replace("\\", "").strip()
+                        catalyst = clean[:400] if clean else "No catalyst summary"
+                # Human readable
+                return f"Sentiment: {sentiment} | Regime: {regime}\nCatalyst: {catalyst[:400]}"
+            except Exception:
+                return content[:500].replace("{", "").replace("}", "").replace("\\", "").strip()
+
+        def _human_strategy_summary(content: str, s: Dict[str, Any]) -> Dict[str, Any]:
+            """Ensure strategy output is human readable and not empty; fallback to deterministic if empty."""
+            text = (content or "").strip()
+            # Clean code fences and braces for display
+            import re, json
+
+            if not text or len(text) < 5:
+                # Empty LLM output — generate deterministic fallback trade proposal
+                try:
+                    from backend.data.market import fetch_ohlcv
+                    import pandas as pd
+
+                    # Use BTC/USD if user requested crypto in prompt, else AAPL
+                    prompt_text = str(s.get("messages", [])[-1].get("content") if isinstance(s.get("messages", [])[-1], dict) else getattr(s.get("messages", [])[-1], "content", "")) if s.get("messages") else ""
+                    symbol = "BTC/USD" if "BTC" in prompt_text.upper() else "AAPL"
+                    df = fetch_ohlcv(symbol, limit=5)
+                    close = float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns and not df["close"].isna().all() else (85000 if "BTC" in symbol else 150.0)
+                    atr = float(df["atr"].iloc[-1]) if not df.empty and "atr" in df.columns and not df["atr"].isna().all() else (800 if "BTC" in symbol else 2.0)
+                    # Simple ATR sizing
+                    qty = round(min(100000 * 0.01 / atr, 100000 * 0.15 / close), 2) if atr else 1
+                    return {
+                        "output": f"Buy {qty} {symbol} @ ~{close:.2f} (ATR {atr:.2f}) | Stop {close - 1.5*atr:.2f} | Target {close + 2.5*atr:.2f} | Fallback deterministic (LLM empty)",
+                        "action": "buy",
+                        "symbol": symbol,
+                        "qty": qty,
+                        "stop_price": round(close - 1.5 * atr, 2),
+                        "target_price": round(close + 2.5 * atr, 2),
+                        "rationale": "Fallback deterministic: LLM returned empty, using ATR-based sizing",
+                        "fallback": True,
+                    }
+                except Exception:
+                    return {
+                        "output": "Buy 1 AAPL @ 150.00 — fallback deterministic",
+                        "action": "buy",
+                        "symbol": "AAPL",
+                        "qty": 1,
+                        "fallback": True,
+                    }
+            # Clean for human readable
+            clean = re.sub(r"```[a-z]*\n?", "", text).replace("```", "").strip()
+            # Try to extract JSON and format nicely
+            try:
+                m = re.search(r"\{[^}]+\}", clean, re.DOTALL)
+                if m:
+                    j = json.loads(m.group(0))
+                    # Build human line
+                    action = j.get("action", "hold")
+                    sym = j.get("symbol", "AAPL")
+                    qty = j.get("qty", "?")
+                    return {
+                        "output": f"{action.upper()} {qty} {sym} | {j.get('rationale', '')[:200]}",
+                        "action": action,
+                        "symbol": sym,
+                        "qty": qty,
+                        **j,
+                    }
+            except Exception:
+                pass
+            # Return cleaned text as output
+            human = clean.replace("{", "").replace("}", "").replace("\\", "").replace('"', "").strip()
+            # Also try to ensure we have action/symbol/qty for risk
+            return {"output": human[:600], "action": "buy" if "buy" in human.lower() else "hold", "symbol": "BTC/USD" if "BTC" in human else "AAPL", "qty": 1}
+
         def research_node(state: Any) -> Dict[str, Any]:
-            """Built-in research agent node — single invoke, map output to GraphState."""
+            """Built-in research agent node — single invoke, map output to human readable GraphState."""
             s = _to_dict(state)
             msgs = s.get("messages", [{"role": "user", "content": GRAPH_RESEARCH_PROMPT}])
             result = research_agent.invoke({"messages": msgs})
             last = result.get("messages", [{}])[-1]
             content = getattr(last, "content", str(last)) if hasattr(last, "content") else str(last)
-            # Map built-in agent output directly to state — no duplicate stub call
+            raw = str(content)
+            # Build human readable via helper
+            human = _human_research_summary(raw, s.get("research", {}))
+            # Also try to get structured research from agent if available
+            structured = {}
+            try:
+                import json, re
+
+                m = re.search(r"\{[^}]+\}", raw, re.DOTALL)
+                if m:
+                    j = json.loads(m.group(0))
+                    structured = j
+            except Exception:
+                pass
+            research_val = {
+                "output": human,
+                "raw_output": raw[:1000],
+                "sentiment": structured.get("sentiment", "neutral"),
+                "regime": structured.get("regime", "neutral"),
+                "catalyst_summary": structured.get("catalyst_summary", human[:400]),
+                "agent": "research",
+                "model": _model_id("research"),
+                "built_in": True,
+            }
             return {
                 **s,
-                "research": {"output": str(content), "agent": "research", "model": _model_id("research"), "built_in": True},
+                "research": research_val,
                 "messages": result.get("messages", msgs),
             }
 
@@ -101,9 +219,26 @@ def build_graph(checkpointer=None):
             result = strategy_agent.invoke({"messages": msgs})
             last = result.get("messages", [{}])[-1]
             content = getattr(last, "content", str(last)) if hasattr(last, "content") else str(last)
+            raw = str(content)
+            human_dict = _human_strategy_summary(raw, s)
+            # Merge human_dict into strategy
+            strategy_val = {
+                **human_dict,
+                "agent": "strategy",
+                "model": _model_id("strategy"),
+                "built_in": True,
+                "raw_output": raw[:1000],
+            }
+            # Ensure required fields for risk
+            if "action" not in strategy_val:
+                strategy_val["action"] = human_dict.get("action", "hold")
+            if "symbol" not in strategy_val:
+                strategy_val["symbol"] = human_dict.get("symbol", "AAPL")
+            if "qty" not in strategy_val:
+                strategy_val["qty"] = human_dict.get("qty", 1)
             return {
                 **s,
-                "strategy": {"output": str(content), "agent": "strategy", "model": _model_id("strategy"), "built_in": True},
+                "strategy": strategy_val,
                 "messages": result.get("messages", msgs),
             }
 

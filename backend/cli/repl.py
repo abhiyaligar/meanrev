@@ -150,6 +150,129 @@ def _has(obj: Any, key: str) -> bool:
     return hasattr(obj, key) and getattr(obj, key, None) is not None
 
 
+def _human_step(step: str, data: Any) -> str:
+    """Human readable rendering for each agent step — no braces, no backslashes, no code fences."""
+    if not isinstance(data, dict):
+        # Clean any raw string: strip code fences, braces, backslashes
+        s = str(data).replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace("\\", "").replace('"', "").strip()
+        return s[:600]
+    # Research: Sentiment | Regime | Catalyst
+    if step == "research":
+        sentiment = data.get("sentiment") or data.get("output", "")[:80]
+        regime = data.get("regime", "")
+        catalyst = data.get("catalyst_summary") or data.get("output") or ""
+        # Clean catalyst
+        catalyst = str(catalyst).replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace("\\", "").replace('"', "").strip()
+        # If output already human like "Sentiment: ...", use it directly
+        output = data.get("output", "")
+        if output and "Sentiment:" in output:
+            return output[:600]
+        parts = []
+        if sentiment:
+            parts.append(f"Sentiment: {sentiment}")
+        if regime:
+            parts.append(f"Regime: {regime}")
+        if catalyst:
+            # Take first 300 chars of catalyst, no braces
+            clean_cat = catalyst.replace("{", "").replace("}", "").replace("\\", "").strip()[:300]
+            parts.append(f"Catalyst: {clean_cat}")
+        return " | ".join(parts) if parts else str(data.get("output", ""))[:600].replace("{", "").replace("}", "").replace("\\", "")
+
+    # Strategy: Action Symbol Qty Price Stop/Target + Option
+    if step == "strategy":
+        action = str(data.get("action", data.get("output", "")[:20]) or "hold").upper()
+        symbol = data.get("symbol", "")
+        qty = data.get("qty", data.get("notional", ""))
+        price = data.get("price") or data.get("close") or ""
+        stop = data.get("stop_price", "")
+        target = data.get("target_price", "")
+        atr = data.get("atr", "")
+        rationale = data.get("rationale") or data.get("output", "")
+        # Clean rationale
+        rationale = str(rationale).replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace("\\", "").replace('"', "").strip()[:300]
+        # Option leg
+        option = ""
+        if data.get("option_leg"):
+            leg = data["option_leg"]
+            if isinstance(leg, dict):
+                option = f"Option: {leg.get('symbol','')} Delta {leg.get('greeks',{}).get('delta','')}"
+            else:
+                option = f"Option: {leg}"
+        elif data.get("option_symbol"):
+            option = f"Option: {data['option_symbol']}"
+        # Use output if it already is human like "BUY 1 AAPL..."
+        output = data.get("output", "")
+        if output and ("BUY" in output.upper() or "SELL" in output.upper()) and "ATR" in output:
+            return str(output)[:600].replace("{", "").replace("}", "").replace("\\", "")
+        header = f"{action} {qty} {symbol}".strip()
+        if price:
+            header += f" @ {price}"
+        if atr:
+            header += f" (ATR {atr})"
+        details = []
+        if stop:
+            details.append(f"Stop {stop}")
+        if target:
+            details.append(f"Target {target}")
+        if option:
+            details.append(option)
+        body = " | ".join(details) if details else ""
+        if rationale and "fallback" not in rationale.lower():
+            body += f"\nRationale: {rationale[:250]}" if body else f"Rationale: {rationale[:250]}"
+        return f"{header}\n{body}".strip()[:600]
+
+    # Risk: Decision + Rule + Drawdown
+    if step == "risk":
+        decision = data.get("decision", "no_trade")
+        rule = data.get("rule", "")
+        drawdown = data.get("drawdown", "")
+        # Clean rule
+        rule = str(rule).replace("{", "").replace("}", "").replace("\\", "").strip()
+        parts = [f"Decision: {decision}"]
+        if rule:
+            parts.append(f"Rule: {rule[:300]}")
+        if drawdown != "" and drawdown is not None:
+            try:
+                dd = float(drawdown)
+                parts.append(f"Drawdown: {dd:.2%}")
+            except Exception:
+                parts.append(f"Drawdown: {drawdown}")
+        if data.get("spxw_flag"):
+            parts.append("SPXW settlement lag flagged")
+        return " | ".join(parts)
+
+    # Execution: Status + Order ID + Fill
+    if step == "execution":
+        status = data.get("status", "skipped")
+        order_id = data.get("order_id", "")
+        filled = data.get("filled_qty", "")
+        price = data.get("filled_price") or data.get("price") or ""
+        # Clean
+        order = data.get("order", {})
+        symbol = order.get("symbol", "") if isinstance(order, dict) else ""
+        qty = order.get("qty", "") if isinstance(order, dict) else ""
+        parts = [f"Status: {status}"]
+        if order_id and order_id != "unknown":
+            parts.append(f"Order ID: {order_id}")
+        if symbol:
+            parts.append(f"Symbol: {symbol}")
+        if qty:
+            parts.append(f"Qty: {qty}")
+        if filled:
+            parts.append(f"Filled: {filled} @ {price}" if price else f"Filled: {filled}")
+        if data.get("latency_ms"):
+            parts.append(f"Latency: {data['latency_ms']}ms")
+        if data.get("human_approved"):
+            parts.append("Human Approved")
+        if data.get("auto"):
+            parts.append("Auto Mode")
+        return " | ".join(parts)
+
+    # Fallback for other steps: clean braces
+    s = str(data).replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace("\\", "").replace("'", "").strip()
+    return s[:600]
+
+
 def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
     """
     Run graph with rich.live streaming of research→strategy→risk→execution.
@@ -192,11 +315,11 @@ def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
                     # Real streaming would iterate stream.messages / stream.values
                     result = graph.invoke(state, config=config)
                     result = _normalize_result(result)
-                    # After invoke, populate table
+                    # After invoke, populate table with human readable
                     for step in ("research", "strategy", "risk", "execution"):
                         if _has(result, step) and _get(result, step):
-                            out = str(_get(result, step))[:500]
-                            table.add_row(step, out)
+                            out = _human_step(step, _get(result, step))
+                            table.add_row(step, out[:600])
                             live.update(table)
                             time.sleep(0.1)  # subtle animation for demo
                 return result
@@ -219,9 +342,9 @@ def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
                 result = _normalize_result(result)
                 for step in ("research", "strategy", "risk", "execution", "reporting"):
                     if _has(result, step) and _get(result, step):
-                        out = str(_get(result, step))
+                        out = _human_step(step, _get(result, step))
                         # Truncate for display
-                        display = out[:400] + ("..." if len(out) > 400 else "")
+                        display = out[:600] + ("..." if len(out) > 600 else "")
                         table.add_row(step, display)
                         live.update(table)
                         time.sleep(0.05)
@@ -363,26 +486,31 @@ def run_repl(thread_id: str = "cli", default_symbol: str = "AAPL", dry_run: bool
                 except Exception as e:
                     print(f"Resume failed: {e}")
 
-            # Render final state summary via rich — handle both dict and GraphState object
+            # Render final state summary via rich — human readable, no braces
             try:
                 from rich.console import Console
                 from rich.table import Table
 
                 console = Console()
-                table = Table(title="Result", show_header=False)
-                table.add_column("Key", style="cyan")
-                table.add_column("Value", overflow="fold")
+                table = Table(title="Result — Human Readable", show_header=False, show_lines=True)
+                table.add_column("Step", style="cyan", width=12)
+                table.add_column("Summary", overflow="fold")
                 for k in ("research", "strategy", "risk", "execution"):
                     if _has(result, k) and _get(result, k):
-                        val = str(_get(result, k))
-                        table.add_row(k, val[:600] + ("..." if len(val) > 600 else ""))
+                        val = _human_step(k, _get(result, k))
+                        table.add_row(k.capitalize(), val[:800] + ("..." if len(val) > 800 else ""))
+                # Show P&L if available
+                if _has(result, "execution"):
+                    exec_data = _get(result, "execution")
+                    if isinstance(exec_data, dict) and exec_data.get("order"):
+                        table.add_row("Order", str(exec_data.get("order"))[:400])
                 console.print(table)
             except Exception:
-                # Fallback plain
+                # Fallback plain human readable
                 for k in ("research", "strategy", "risk", "execution"):
                     if _has(result, k):
                         try:
-                            print(f"{k}: {str(_get(result, k))[:500]}")
+                            print(f"{k.capitalize()}: {_human_step(k, _get(result, k))[:600]}")
                         except Exception:
                             pass
 
