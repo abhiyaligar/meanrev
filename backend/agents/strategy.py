@@ -17,7 +17,7 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolCallLimitM
 
 from backend.core.logging import log_event
 from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
-from backend.core.utils import get_model_id, handle_tool_errors
+from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
 from backend.tools.market_tools import align_timeframes_tool, get_market_snapshot, get_ohlcv, get_option_chain
 
@@ -42,46 +42,6 @@ _MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=30, run_limit=15), handle_to
 
 def _model_id() -> str:
     return get_model_id("strategy")
-
-
-# --- 9.1: Token counter <1000 via tiktoken ---
-
-def count_tokens(text: str, model_id: Optional[str] = None) -> int:
-    """Count tokens via tiktoken; fallback to cl100k_base and rough len/4 estimate."""
-    if not text:
-        return 0
-    try:
-        import tiktoken
-
-        # Try model-specific encoding, fallback to cl100k_base
-        try:
-            enc = tiktoken.encoding_for_model(model_id or "gpt-4o")
-        except Exception:
-            enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
-    except Exception:
-        # Rough fallback: ~4 chars per token
-        return max(1, len(text) // 4)
-
-
-def enforce_token_limit(prompt: str, max_tokens: int = 1000, model_id: Optional[str] = None) -> str:
-    """Truncate prompt to fit max_tokens, preserving head and tail for context."""
-    tokens = count_tokens(prompt, model_id)
-    if tokens <= max_tokens:
-        return prompt
-    # Truncate middle, keep head (system) and tail (recent research)
-    # Simple: cut to max_chars ~ max_tokens*4
-    max_chars = max_tokens * 4 - 200  # buffer
-    if len(prompt) <= max_chars:
-        return prompt
-    head = prompt[: max_chars // 2]
-    tail = prompt[-max_chars // 2 :]
-    truncated = head + "\n\n[...truncated for token limit...]\n\n" + tail
-    log_event("strategy_token_truncated", original_tokens=tokens, truncated_tokens=count_tokens(truncated, model_id), max_tokens=max_tokens)
-    return truncated
-
-
-# --- 9.4: Natural-language instruction hook ---
 
 def apply_instruction(state: Dict[str, Any], instruction: Optional[str] = None) -> Dict[str, Any]:
     """

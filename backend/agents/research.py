@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from backend.core.logging import log_event
 from backend.core.system_prompt import RESEARCH_SYSTEM_PROMPT
-from backend.core.utils import get_model_id, handle_tool_errors
+from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.news_tools import extract_keywords, fetch_news, get_macro_calendar
 
 
@@ -36,42 +36,6 @@ _RESEARCH_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=20, run_limit=10), 
 
 def _model_id() -> str:
     return get_model_id("research")
-
-
-# --- 10.1: Token counter <1000 via tiktoken ---
-
-def count_tokens(text: str, model_id: Optional[str] = None) -> int:
-    """Count tokens via tiktoken; fallback to cl100k_base and len//4."""
-    if not text:
-        return 0
-    try:
-        import tiktoken
-
-        try:
-            enc = tiktoken.encoding_for_model(model_id or "gpt-4o")
-        except Exception:
-            enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
-
-
-def enforce_token_limit(prompt: str, max_tokens: int = 1000, model_id: Optional[str] = None) -> str:
-    """Truncate prompt to fit max_tokens, preserving head/tail."""
-    tokens = count_tokens(prompt, model_id)
-    if tokens <= max_tokens:
-        return prompt
-    max_chars = max_tokens * 4 - 200
-    if len(prompt) <= max_chars:
-        return prompt
-    head = prompt[: max_chars // 2]
-    tail = prompt[-max_chars // 2 :]
-    truncated = head + "\n\n[...truncated for token limit...]\n\n" + tail
-    log_event("research_token_truncated", original_tokens=tokens, truncated_tokens=count_tokens(truncated, model_id), max_tokens=max_tokens)
-    return truncated
-
-
-# --- 10.3: Prior regime continuity ---
 
 def get_prior_regime(state: Dict[str, Any]) -> Optional[str]:
     """Extract prior regime from GraphState for continuity (via InMemorySaver thread_id persistence)."""
