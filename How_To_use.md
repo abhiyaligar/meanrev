@@ -4,7 +4,7 @@
 
 ---
 
-## Single Command `meanrev` — Like `claude` / `codex` (Copy-Paste)
+## Single Command `meanrev`
 
 **Install once** (creates `meanrev` in `venv/Scripts/meanrev.exe` + wrappers `meanrev.bat`/`meanrev`):
 ```bash
