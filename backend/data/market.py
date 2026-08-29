@@ -52,6 +52,48 @@ def _set_cached(key: str, df: pd.DataFrame) -> None:
         _CACHE.pop(oldest, None)
 
 
+def _is_crypto_symbol(symbol: str) -> bool:
+    """Detect crypto symbol: BTC/USD, BTCUSD, BTC, ETH, SOL, etc."""
+    if not symbol:
+        return False
+    s = symbol.strip().upper().replace(" ", "")
+    # Direct crypto pairs
+    if "/" in s:
+        base = s.split("/")[0]
+        return base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM")
+    # Without slash
+    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM"):
+        return True
+    if s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "BTCUSDT", "ETHUSDT"):
+        return True
+    # Heuristic: ends with USD/USDT and base is crypto
+    for base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC"):
+        if s.startswith(base) and (s == base or s.endswith("USD") or s.endswith("USDT")):
+            return True
+    return False
+
+
+def _normalize_crypto_symbol(symbol: str) -> str:
+    """Normalize crypto to Alpaca format BTC/USD. BTC -> BTC/USD, BTCUSD -> BTC/USD."""
+    s = symbol.strip().upper().replace(" ", "")
+    if "/" in s:
+        return s
+    # Map without slash
+    mapping = {
+        "BTCUSD": "BTC/USD",
+        "ETHUSD": "ETH/USD",
+        "SOLUSD": "SOL/USD",
+        "DOGEUSD": "DOGE/USD",
+        "BTCUSDT": "BTC/USD",
+        "ETHUSDT": "ETH/USD",
+    }
+    if s in mapping:
+        return mapping[s]
+    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT"):
+        return f"{s}/USD"
+    return s
+
+
 def _get_data_client():
     """Create StockHistoricalDataClient from paper creds, or None if not configured."""
     s = get_settings()
@@ -67,6 +109,27 @@ def _get_data_client():
     except Exception as e:
         log_event("market_data_client_error", level="warning", error=str(e))
         return None
+
+
+def _get_crypto_client():
+    """Create CryptoHistoricalDataClient for BTC/USD etc., or None."""
+    s = get_settings()
+    key = s.get_key()
+    secret = s.get_secret()
+    if not key or not secret:
+        return None
+    try:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+
+        return CryptoHistoricalDataClient(api_key=key, secret_key=secret)
+    except Exception:
+        try:
+            from alpaca.data.historical.crypto import CryptoHistoricalDataClient as CryptoClient2  # type: ignore
+
+            return CryptoClient2(api_key=key, secret_key=secret)
+        except Exception as e:
+            log_event("crypto_client_error", level="warning", error=str(e))
+            return None
 
 
 def _timeframe_to_alpaca(timeframe: str):
@@ -205,35 +268,62 @@ def fetch_ohlcv(
         # Return cached stale if available, else empty
         return cached if cached is not None else pd.DataFrame()
 
-    client = _get_data_client()
-    if client is None:
-        return pd.DataFrame()
+    # Crypto vs Stock client selection
+    is_crypto = _is_crypto_symbol(sym)
+    if is_crypto:
+        sym = _normalize_crypto_symbol(sym)
+        client = _get_crypto_client()
+        if client is None:
+            log_event("crypto_client_missing", level="warning", symbol=sym)
+            return pd.DataFrame()
+    else:
+        client = _get_data_client()
+        if client is None:
+            return pd.DataFrame()
 
     try:
-        from alpaca.data.requests import StockBarsRequest
-
         tf = _timeframe_to_alpaca(timeframe)
         if tf is None:
             log_event("market_data_timeframe_error", level="warning", timeframe=timeframe)
             return pd.DataFrame()
 
-        # Build request — start defaults to limit* timeframe ago
-        if start is None and end is None:
-            # Let Alpaca default to recent bars via limit
-            req = StockBarsRequest(symbol_or_symbols=sym, timeframe=tf, limit=lim)
+        # Build request — crypto uses CryptoBarsRequest, stock uses StockBarsRequest
+        if is_crypto:
+            try:
+                from alpaca.data.requests import CryptoBarsRequest
+            except ImportError:
+                from alpaca.data.requests.crypto import CryptoBarsRequest  # type: ignore
+
+            if start is None and end is None:
+                req = CryptoBarsRequest(symbol_or_symbols=sym, timeframe=tf, limit=lim)
+            else:
+                req_kwargs: Dict[str, object] = {"symbol_or_symbols": sym, "timeframe": tf, "limit": lim}
+                if start:
+                    req_kwargs["start"] = start
+                if end:
+                    req_kwargs["end"] = end
+                req = CryptoBarsRequest(**req_kwargs)  # type: ignore
         else:
-            req_kwargs: Dict[str, object] = {"symbol_or_symbols": sym, "timeframe": tf, "limit": lim}
-            if start:
-                req_kwargs["start"] = start
-            if end:
-                req_kwargs["end"] = end
-            req = StockBarsRequest(**req_kwargs)  # type: ignore
+            from alpaca.data.requests import StockBarsRequest
+
+            if start is None and end is None:
+                req = StockBarsRequest(symbol_or_symbols=sym, timeframe=tf, limit=lim)
+            else:
+                req_kwargs: Dict[str, object] = {"symbol_or_symbols": sym, "timeframe": tf, "limit": lim}
+                if start:
+                    req_kwargs["start"] = start
+                if end:
+                    req_kwargs["end"] = end
+                req = StockBarsRequest(**req_kwargs)  # type: ignore
 
         # Timeout 30s per VULN 3
         import concurrent.futures
 
         def _do_fetch():
-            return client.get_stock_bars(req)
+            if is_crypto:
+                return client.get_crypto_bars(req)
+            else:
+                return client.get_stock_bars(req)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             future = ex.submit(_do_fetch)

@@ -84,6 +84,87 @@ class GraphState(BaseModel):
 
     model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
+    # --- Dict compatibility for CLI/graph nodes that use state.get(...) / state["key"] ---
+    # LangGraph returns a GraphState object, but many nodes were written for dict. Add get/__getitem__/__contains__ so both work.
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        if self.__pydantic_extra__ and key in self.__pydantic_extra__:
+            return self.__pydantic_extra__[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if hasattr(self, key):
+            setattr(self, key, value)
+        else:
+            if self.__pydantic_extra__ is None:
+                self.__pydantic_extra__ = {}
+            self.__pydantic_extra__[key] = value
+            # Also set as attribute for direct access
+            object.__setattr__(self, key, value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            if hasattr(self, key):
+                val = getattr(self, key)
+                # For BaseModel fields, getattr returns the value even if None; treat as present
+                return val if val is not None or key in self.model_fields else default
+            if self.__pydantic_extra__ and key in self.__pydantic_extra__:
+                return self.__pydantic_extra__[key]
+            return default
+        except Exception:
+            return default
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key) or (self.__pydantic_extra__ is not None and key in self.__pydantic_extra__)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key in self:
+            val = self.get(key)
+            if val is not None:
+                return val
+            # For explicit None, treat as missing for setdefault semantics
+            # Check if key is a field with None vs missing extra
+            if key in self.model_fields and getattr(self, key) is None and default is not None:
+                self[key] = default
+                return default
+            return val
+        self[key] = default
+        return default
+
+    def update(self, other: Any = None, **kwargs: Any) -> None:
+        if other is not None:
+            if isinstance(other, dict):
+                for k, v in other.items():
+                    self[k] = v
+            elif hasattr(other, "items"):
+                for k, v in other.items():  # type: ignore
+                    self[k] = v
+            elif hasattr(other, "model_dump"):
+                for k, v in other.model_dump().items():
+                    if v is not None:
+                        self[k] = v
+        for k, v in kwargs.items():
+            self[k] = v
+
+    def keys(self):
+        # Merge fields and extra
+        base = list(self.model_fields.keys())
+        if self.__pydantic_extra__:
+            base.extend(k for k in self.__pydantic_extra__.keys() if k not in base)
+        # Also include any dynamically set attrs that are not fields
+        for k in self.__dict__.keys():
+            if k not in base and not k.startswith("_"):
+                base.append(k)
+        return base
+
+    def items(self):
+        return [(k, self.get(k)) for k in self.keys()]
+
+    def values(self):
+        return [self.get(k) for k in self.keys()]
+
     # --- Helpers ---
 
     def to_dict(self) -> Dict[str, Any]:

@@ -240,6 +240,9 @@ def submit_order(
     if ot not in ("market", "limit", "stop"):
         ot = "market"
     tif = time_in_force.strip().lower() if time_in_force else "day"
+    # Crypto requires GTC (not DAY); if user passes day for crypto, auto-correct to gtc
+    if _is_crypto_symbol(sym) and tif == "day":
+        tif = "gtc"
     # Map tif string to alpaca enum via lower
     # Alpaca TimeInForce: Day, GTC, OPG, CLS, IOC, FOK
     tif_map = {"day": "day", "gtc": "gtc", "opg": "opg", "cls": "cls", "ioc": "ioc", "fok": "fok"}
@@ -265,9 +268,12 @@ def submit_order(
         # Detect option symbol heuristic: contains expiry + C/P + strike (e.g., AAPL240830C00150000) or SPXW family
         is_option = len(sym) > 12 and any(c in sym for c in ("C", "P")) or _is_option_symbol(sym)
 
-        # Build request — amount of qty: for stocks, qty is shares (float allowed), for options, qty is contracts (int)
-        # Alpaca expects int for options, but float is ok for stocks; we cast to int if option
-        order_qty = int(q) if is_option else q
+        # Build request — qty handling: stocks float shares, options int contracts, crypto float coins
+        is_crypto = _is_crypto_symbol(sym)
+        if is_crypto:
+            order_qty = float(q)  # crypto fractional allowed
+        else:
+            order_qty = int(q) if is_option else q
 
         if ot == "limit":
             if limit_price is None or limit_price <= 0:
@@ -303,8 +309,28 @@ def submit_order(
     return _call_with_retry(_do)
 
 
+def _is_crypto_symbol(sym: str) -> bool:
+    """Detect crypto for qty/time_in_force handling (BTC/USD, BTC, ETH/USD etc.)."""
+    if not sym:
+        return False
+    s = sym.strip().upper().replace(" ", "")
+    if "/" in s:
+        base = s.split("/")[0]
+        return base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM")
+    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT"):
+        return True
+    if s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "BTCUSDT", "ETHUSDT"):
+        return True
+    for base in ("BTC", "ETH", "SOL", "DOGE"):
+        if s.startswith(base) and (s == base or s.endswith("USD") or s.endswith("USDT")):
+            return True
+    return False
+
+
 def _is_option_symbol(sym: str) -> bool:
     """Heuristic for option symbol vs equity: option symbols are long and contain date+strike, or SPXW family."""
+    if _is_crypto_symbol(sym):
+        return False
     s = sym.upper()
     if s.startswith(("SPXW", "XSP", "SPX", "NDX", "RUT")):
         return True

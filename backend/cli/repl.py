@@ -8,7 +8,7 @@ REPL loop — Phase 11.3 + 11b
 
 import asyncio
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from backend.core.logging import log_event
 
@@ -96,15 +96,72 @@ def _enforce_token_limit_for_graph(state: Dict) -> Dict:
     return state
 
 
+def _to_dict(obj: Any) -> Dict[str, Any]:
+    """Normalize GraphState object or dict to plain dict for .get / in checks."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    try:
+        return dict(obj)
+    except Exception:
+        # Fallback via get
+        out: Dict[str, Any] = {}
+        for k in ("messages", "research", "strategy", "risk", "execution", "reporting", "market_snapshot", "account_state"):
+            try:
+                v = obj.get(k) if hasattr(obj, "get") else getattr(obj, k, None)
+                if v is not None:
+                    out[k] = v
+            except Exception:
+                pass
+        # Also check __dict__ and extra
+        if hasattr(obj, "__dict__"):
+            out.update({k: v for k, v in obj.__dict__.items() if not k.startswith("_")})
+        if hasattr(obj, "__pydantic_extra__") and obj.__pydantic_extra__:
+            out.update(obj.__pydantic_extra__)
+        return out
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Safe get for dict or GraphState object."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    if hasattr(obj, "get"):
+        try:
+            return obj.get(key, default)
+        except Exception:
+            pass
+    return getattr(obj, key, default)
+
+
+def _has(obj: Any, key: str) -> bool:
+    if isinstance(obj, dict):
+        return key in obj
+    if hasattr(obj, "__contains__"):
+        try:
+            return key in obj
+        except Exception:
+            pass
+    return hasattr(obj, key) and getattr(obj, key, None) is not None
+
+
 def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
     """
     Run graph with rich.live streaming of research→strategy→risk→execution.
     Uses graph.stream_events if available, else invoke with Live updates.
-    Returns final state.
+    Returns final state as plain dict (normalized from GraphState object).
     """
     from backend.graph.build import build_graph
 
     graph = build_graph()
+
+    def _normalize_result(res: Any) -> Dict[str, Any]:
+        return _to_dict(res) if not isinstance(res, dict) else res
 
     # Try streaming via rich.live
     try:
@@ -134,10 +191,11 @@ def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
                     # For now, fallback to invoke + manual Live updates for stub
                     # Real streaming would iterate stream.messages / stream.values
                     result = graph.invoke(state, config=config)
+                    result = _normalize_result(result)
                     # After invoke, populate table
                     for step in ("research", "strategy", "risk", "execution"):
-                        if step in result and result[step]:
-                            out = str(result[step])[:500]
+                        if _has(result, step) and _get(result, step):
+                            out = str(_get(result, step))[:500]
                             table.add_row(step, out)
                             live.update(table)
                             time.sleep(0.1)  # subtle animation for demo
@@ -158,27 +216,30 @@ def _run_graph_with_streaming(state: Dict, thread_id: str = "cli") -> Dict:
 
             with Live(table, console=console, refresh_per_second=4) as live:
                 result = graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+                result = _normalize_result(result)
                 for step in ("research", "strategy", "risk", "execution", "reporting"):
-                    if step in result and result[step]:
-                        out = str(result[step])
+                    if _has(result, step) and _get(result, step):
+                        out = str(_get(result, step))
                         # Truncate for display
                         display = out[:400] + ("..." if len(out) > 400 else "")
                         table.add_row(step, display)
                         live.update(table)
                         time.sleep(0.05)
                 # Also show final P&L if available
-                if "execution" in result:
-                    log_event("cli_graph_complete", steps=list(result.keys()))
+                if _has(result, "execution"):
+                    log_event("cli_graph_complete", steps=list(result.keys()) if isinstance(result, dict) else [])
             return result
         except Exception:
             # Final fallback: no rich
-            return graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+            result = graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+            return _normalize_result(result)
 
     except Exception as e:
         log_event("cli_graph_error", error=str(e)[:300])
         # Ultimate fallback: direct invoke without Live
         try:
-            return graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+            result = graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+            return _normalize_result(result)
         except Exception as e2:
             return {"error": str(e2)[:500], "state": state}
 
@@ -258,15 +319,24 @@ def run_repl(thread_id: str = "cli", default_symbol: str = "AAPL", dry_run: bool
             # Run graph with live streaming
             result = _run_graph_with_streaming(state, thread_id=thread_id)
 
-            # Handle interrupts (HITL) — if result has __interrupt__, prompt for decision
-            if isinstance(result, dict) and "__interrupt__" in result:
-                print("\n[bold yellow]Human approval required:[/bold yellow]")
-                try:
-                    from rich.console import Console
+            # Handle interrupts (HITL) — if result has __interrupt__, prompt for decision (handle both dict and GraphState object)
+            has_interrupt = _has(result, "__interrupt__") or ("__interrupt__" in result if isinstance(result, dict) else False)
+            if has_interrupt:
+                interrupt_val = _get(result, "__interrupt__", result.get("__interrupt__") if isinstance(result, dict) else None)
+                # Also try direct dict access for GraphState object via model_extra
+                if interrupt_val is None:
+                    try:
+                        interrupt_val = result["__interrupt__"] if isinstance(result, dict) else getattr(result, "__interrupt__", None)
+                    except Exception:
+                        interrupt_val = None
+                if interrupt_val is not None:
+                    print("\n[bold yellow]Human approval required:[/bold yellow]")
+                    try:
+                        from rich.console import Console
 
-                    Console().print(str(result["__interrupt__"])[:1000])
-                except Exception:
-                    print(str(result["__interrupt__"])[:1000])
+                        Console().print(str(interrupt_val)[:1000])
+                    except Exception:
+                        print(str(interrupt_val)[:1000])
 
                 # Prompt for decision
                 try:
@@ -293,7 +363,7 @@ def run_repl(thread_id: str = "cli", default_symbol: str = "AAPL", dry_run: bool
                 except Exception as e:
                     print(f"Resume failed: {e}")
 
-            # Render final state summary via rich
+            # Render final state summary via rich — handle both dict and GraphState object
             try:
                 from rich.console import Console
                 from rich.table import Table
@@ -303,15 +373,18 @@ def run_repl(thread_id: str = "cli", default_symbol: str = "AAPL", dry_run: bool
                 table.add_column("Key", style="cyan")
                 table.add_column("Value", overflow="fold")
                 for k in ("research", "strategy", "risk", "execution"):
-                    if k in result and result[k]:
-                        val = str(result[k])
+                    if _has(result, k) and _get(result, k):
+                        val = str(_get(result, k))
                         table.add_row(k, val[:600] + ("..." if len(val) > 600 else ""))
                 console.print(table)
             except Exception:
                 # Fallback plain
                 for k in ("research", "strategy", "risk", "execution"):
-                    if k in result:
-                        print(f"{k}: {str(result[k])[:500]}")
+                    if _has(result, k):
+                        try:
+                            print(f"{k}: {str(_get(result, k))[:500]}")
+                        except Exception:
+                            pass
 
         except KeyboardInterrupt:
             # Handled in __main__.py, but also here

@@ -64,28 +64,45 @@ def build_graph(checkpointer=None):
         if checkpointer is None:
             checkpointer = InMemorySaver()
 
-        def research_node(state: Dict[str, Any]) -> Dict[str, Any]:
+        def _to_dict(s: Any) -> Dict[str, Any]:
+            # Normalize GraphState object or dict to plain dict for ** spread and .get
+            if hasattr(s, "model_dump"):
+                try:
+                    return s.model_dump()
+                except Exception:
+                    pass
+            if isinstance(s, dict):
+                return dict(s)
+            try:
+                return dict(s)
+            except Exception:
+                # Fallback via get
+                return {k: s.get(k) for k in ("messages", "research", "strategy", "risk", "execution", "market_snapshot", "account_state", "reporting_context") if s.get(k) is not None}
+
+        def research_node(state: Any) -> Dict[str, Any]:
             """Built-in research agent node — single invoke, map output to GraphState."""
-            msgs = state.get("messages", [{"role": "user", "content": GRAPH_RESEARCH_PROMPT}])
+            s = _to_dict(state)
+            msgs = s.get("messages", [{"role": "user", "content": GRAPH_RESEARCH_PROMPT}])
             result = research_agent.invoke({"messages": msgs})
             last = result.get("messages", [{}])[-1]
             content = getattr(last, "content", str(last)) if hasattr(last, "content") else str(last)
-            # Map built-in agent output directly to state — no duplicate stub call (useless custom logic removed)
+            # Map built-in agent output directly to state — no duplicate stub call
             return {
-                **state,
+                **s,
                 "research": {"output": str(content), "agent": "research", "model": _model_id("research"), "built_in": True},
                 "messages": result.get("messages", msgs),
             }
 
-        def strategy_node(state: Dict[str, Any]) -> Dict[str, Any]:
-            research_out = state.get("research", {})
+        def strategy_node(state: Any) -> Dict[str, Any]:
+            s = _to_dict(state)
+            research_out = s.get("research", {})
             prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
-            msgs = state.get("messages", []) + [{"role": "user", "content": prompt}]
+            msgs = s.get("messages", []) + [{"role": "user", "content": prompt}]
             result = strategy_agent.invoke({"messages": msgs})
             last = result.get("messages", [{}])[-1]
             content = getattr(last, "content", str(last)) if hasattr(last, "content") else str(last)
             return {
-                **state,
+                **s,
                 "strategy": {"output": str(content), "agent": "strategy", "model": _model_id("strategy"), "built_in": True},
                 "messages": result.get("messages", msgs),
             }
