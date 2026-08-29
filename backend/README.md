@@ -10,15 +10,6 @@ Built for **Alpaca AI Trading Agents Hackathon 2026** (lablab.ai, 28 Aug–4 Sep
 - `alpaca-py==0.44.0` (`TradingClient`)
 - `pydantic-settings`, `python-dotenv`
 
-## Env (your exact 3 vars)
-
-```
-ALPACA_API_URL=https://paper-api.alpaca.markets/v2
-ALPACA_API_KEY=PKM42NNKIXODL6X4BCQAXD7CY6
-ALPACA_API_SECRET=FevbXE3jBFBFUqHwa173JNv3q82ksARzK48tnipqKcvx
-```
-Paper account verified LIVE: `PA3WKUKN51YI` | $100k | options_level 3.
-
 ## Setup
 
 ```bash
@@ -56,7 +47,7 @@ Open:
 curl http://localhost:8000/get_account
 
 # 200:
-# {"connected": true, "account": {"id":"4a916b34...","account_number":"PA3WKUKN51YI","status":"ACTIVE","cash":"100000","portfolio_value":"100000","options_approved_level":3, ...}}
+# {"connected": true, "account": {"id":"4a916b34...","account_number":"PA**********","status":"ACTIVE","cash":"100000","portfolio_value":"100000","options_approved_level":3, ...}}
 # 401/502 if keys invalid
 ```
 
