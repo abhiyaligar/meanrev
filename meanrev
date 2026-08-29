@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# meanrev — single command entry like claude/codex (Unix/macOS)
+# Usage: meanrev [--mode auto|hitl] [--thread-id ID] [--symbol SYM] [--dry-run]
+# Requires: pip install -e .  OR  venv activated
+# Tries venv python first, then python3/python
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
+    exec "$SCRIPT_DIR/venv/bin/python" -m backend.cli "$@"
+elif [ -x "$SCRIPT_DIR/venv/Scripts/python.exe" ]; then
+    exec "$SCRIPT_DIR/venv/Scripts/python.exe" -m backend.cli "$@"
+elif command -v python3 >/dev/null 2>&1; then
+    exec python3 -m backend.cli "$@"
+else
+    exec python -m backend.cli "$@"
+fi

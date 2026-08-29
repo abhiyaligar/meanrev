@@ -11,15 +11,19 @@
 cp backend/.env.example backend/.env
 # Edit backend/.env: set ALPACA_API_KEY/SECRET (paper), LLM_PROVIDER + LLM_MODEL_* + OPENROUTER/GROQ keys
 
-# 2. Install
+# 2. Install (creates `meanrev` single command like claude/codex)
 pip install -r requirements.txt   # or venv\Scripts\activate + pip install
+pip install -e .                  # creates `meanrev` command (venv\Scripts\meanrev.exe on Windows)
 
 # 3. Start API (broker read surface)
 venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload --port 8000
 # -> http://localhost:8000/docs, http://localhost:8000/api/v1/account
 
-# 4. Start CLI (autonomous loop) — in another terminal
-venv\Scripts\python.exe -m backend.cli
+# 4. Start CLI — single command `meanrev` like claude/codex (after pip install -e .)
+meanrev --help
+meanrev --mode auto --thread-id scoring-0831
+# Or via python -m: venv\Scripts\python.exe -m backend.cli
+# Or via wrappers: .\meanrev.bat --help  (Windows)  /  ./meanrev --help  (Unix)
 # -> ₳  prompt — type /help
 ```
 
