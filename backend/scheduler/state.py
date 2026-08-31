@@ -40,11 +40,24 @@ def load_scheduler_state() -> Dict[str, Any]:
     if not STATE_FILE.exists():
         return defaults
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        raw = STATE_FILE.read_text(encoding="utf-8").strip()
+        if not raw:
+            # Empty file (e.g. after manual `> scheduler.json` or crash) — treat as missing, no warning
+            return defaults
+        data = json.loads(raw)
         # Merge defaults
         for k, v in defaults.items():
             data.setdefault(k, v)
         return data
+    except json.JSONDecodeError as e:
+        # Corrupt JSON — backup and reset, warning once
+        try:
+            backup = STATE_FILE.with_suffix(".json.corrupt")
+            STATE_FILE.rename(backup)
+            log_event("scheduler_state_corrupt_reset", level="warning", error=str(e)[:200], backup=str(backup))
+        except Exception:
+            log_event("scheduler_state_load_failed", level="warning", error=str(e)[:200])
+        return defaults
     except Exception as e:
         log_event("scheduler_state_load_failed", level="warning", error=str(e)[:200])
         return defaults
