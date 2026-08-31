@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     execution_mode: str = Field(default="auto", alias="EXECUTION_MODE", description="Execution mode: auto (autonomous, no HITL) or hitl (human approval via interrupt)")
     hitl_enabled: bool = Field(default=False, alias="HITL_ENABLED", description="Enable Human-in-the-Loop for submit_order (requires checkpointer + thread_id)")
 
+    # --- Scheduler (Phase 12b) ---
+    scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED", description="Enable autonomous scheduler loop (tick every interval when market open)")
+    scheduler_interval_min: int = Field(default=5, alias="SCHEDULER_INTERVAL_MIN", description="Scheduler tick interval minutes (1..60, default 5)")
+    scheduler_thread_id: str = Field(default="scheduler", alias="SCHEDULER_THREAD_ID", description="LangGraph thread_id for scheduler ticks (prior_regime continuity)")
+    scheduler_prompt: str = Field(default="Do Research On BTC/USD And Propose a Order", alias="SCHEDULER_PROMPT", description="Prompt for scheduler ticks")
+
     # --- Optional infra ---
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
 

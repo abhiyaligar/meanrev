@@ -1,13 +1,15 @@
 """
-CLI entrypoint — Phase 11.1
+CLI entrypoint — Phase 11.1 + Phase 12b scheduler
 
 Usage:
   python -m backend.cli
   python -m backend.cli --mode hitl --thread-id my-run --symbol AAPL
+  python -m backend.cli --scheduler --thread-id scoring-0831
+  python -m backend.cli --scheduler --dry-run --once
   python -m backend.cli --help
 
-Parses args, checks core/config (LLM_PROVIDER, LLM_MODEL_*, RISK_MAX_*, EXECUTION_MODE),
-prints banner from System_Prompt, and starts repl.
+Parses args, checks core/config (LLM_PROVIDER, LLM_MODEL_*, RISK_MAX_*, EXECUTION_MODE, SCHEDULER_*),
+prints banner from System_Prompt, and starts repl or scheduler loop.
 """
 
 import argparse
@@ -42,6 +44,8 @@ def parse_args(argv=None):
     p.add_argument("--thread-id", dest="thread_id", default="cli", help="LangGraph thread_id for checkpointer persistence")
     p.add_argument("--symbol", default="AAPL", help="Default symbol for quick market checks")
     p.add_argument("--dry-run", action="store_true", help="Dry-run: do not submit orders, only log")
+    p.add_argument("--scheduler", action="store_true", help="Run autonomous scheduler loop (tick every SCHEDULER_INTERVAL_MIN when market open, persists to logs/scheduler.json)")
+    p.add_argument("--once", action="store_true", help="With --scheduler, run single tick then exit (for tests)")
     return p.parse_args(argv)
 
 
@@ -92,6 +96,34 @@ def main(argv=None):
         print(f"Settings: {e}")
 
     log_event("cli_started", thread_id=args.thread_id, mode=args.mode or getattr(get_settings(), "execution_mode", "auto"), symbol=args.symbol)
+
+    # Scheduler mode (Phase 12b) — autonomous loop, no REPL
+    if getattr(args, "scheduler", False):
+        # Also honor SCHEDULER_ENABLED from .env if --scheduler not passed? For now require explicit flag or env
+        try:
+            from backend.core.config import get_settings as _gs
+
+            _s = _gs()
+            # If env says enabled but flag not passed, still respect flag; allow env-only trigger as well
+            env_enabled = bool(getattr(_s, "scheduler_enabled", False))
+            if env_enabled and not getattr(args, "scheduler", False):
+                args.scheduler = True
+        except Exception:
+            pass
+        if getattr(args, "scheduler", False):
+            try:
+                from backend.scheduler.runner import run_scheduler
+
+                # Use thread_id from CLI if provided, else SCHEDULER_THREAD_ID from .env
+                sched_thread = args.thread_id if args.thread_id != "cli" else None
+                run_scheduler(dry_run=args.dry_run, once=getattr(args, "once", False), thread_id=sched_thread)
+                return
+            except Exception as e:
+                print(f"Scheduler failed: {e}", file=sys.stderr)
+                import traceback
+
+                traceback.print_exc()
+                sys.exit(1)
 
     # Start REPL
     try:

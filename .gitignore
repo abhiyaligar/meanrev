@@ -59,6 +59,7 @@ models/checkpoints/
 # --- Logs / agent output ---
 logs/
 *.jsonl
+!logs/.gitkeep
 reports/*.html
 !reports/.gitkeep
 
