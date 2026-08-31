@@ -11,6 +11,7 @@ import json
 from langchain.tools import tool
 
 from backend.broker import client as broker_client
+from backend.core.logging import log_event
 from backend.core.utils import clamp_limit, normalize_symbol
 
 
@@ -150,6 +151,7 @@ def set_stop_loss(symbol: str, stop_price: float, qty: float = 0, side: str = "s
         from backend.broker.client import _is_crypto_symbol as _is_crypto
 
         if _is_crypto(sym):
+            log_event("set_stop_loss", level="warning", order_id="pending", price=float(sp), symbol=sym, qty=float(q_val) if q_val else None, side=sd, error="CryptoStopNotSupported")
             return json.dumps(
                 {
                     "error": f"Crypto {sym} does not support stop orders on Alpaca (only market/limit for crypto). For BTC/ETH, manage risk via position size or manual market sell, or use equities/ETFs for stop-loss demo.",
@@ -159,8 +161,14 @@ def set_stop_loss(symbol: str, stop_price: float, qty: float = 0, side: str = "s
             )
         # Submit stop order via throttled broker client (live)
         result = broker_client.submit_order(symbol=sym, qty=q_val, side=sd, order_type="stop", stop_price=sp)
+        oid = str(result.get("id") or result.get("order_id") or "")
+        # jsonl log — required fields: ts (auto), event, level, order_id, price
+        log_event("set_stop_loss", level="info", order_id=oid, price=float(sp), symbol=sym, qty=float(q_val), side=sd, type="stop")
+        # Also emit generic sell/buy event for dashboard compatibility (event=buy/sell)
+        log_event(sd, level="info", order_id=oid, price=float(sp), symbol=sym, qty=float(q_val), status="stop_submitted")
         return json.dumps({"status": "submitted", "order": result, "stop_price": sp, "symbol": sym, "qty": q_val, "side": sd}, default=str)
     except Exception as e:
+        log_event("set_stop_loss", level="warning", order_id="pending", price=float(stop_price) if str(stop_price).replace(".","",1).isdigit() else None, symbol=symbol, error=str(e)[:200])
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -190,8 +198,13 @@ def modify_order(order_id: str, qty: float = 0, limit_price: float = 0, stop_pri
         if not kwargs:
             return json.dumps({"error": "At least one of qty, limit_price, stop_price, trail required >0 for modify"})
         result = broker_client.replace_order(order_id=oid, **kwargs)
+        new_oid = str(result.get("id") or result.get("order_id") or oid)
+        # Determine price for jsonl (prefer limit > stop > trail)
+        price_val = kwargs.get("limit_price") or kwargs.get("stop_price") or kwargs.get("trail")
+        log_event("modify_order", level="info", order_id=new_oid, price=float(price_val) if price_val is not None else None, symbol=str(result.get("symbol") or ""), qty=float(kwargs.get("qty")) if kwargs.get("qty") else None, modified=kwargs, replaces=oid)
         return json.dumps({"status": "replaced", "order": result, "order_id": oid, "modified": kwargs}, default=str)
     except Exception as e:
+        log_event("modify_order", level="warning", order_id=str(order_id) if order_id else "pending", price=float(limit_price) if limit_price and float(limit_price) > 0 else (float(stop_price) if stop_price and float(stop_price) > 0 else None), error=str(e)[:200])
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -203,8 +216,11 @@ def cancel_order(order_id: str) -> str:
         if not oid:
             return json.dumps({"error": "order_id required"})
         result = broker_client.cancel_order(order_id=oid)
+        log_event("cancel_order", level="info", order_id=str(oid), price=None, status="cancelled")
+        # Also generic event for jsonl dashboard compatibility (cancel as sell-like)
         return json.dumps(result, default=str)
     except Exception as e:
+        log_event("cancel_order", level="warning", order_id=str(order_id) if order_id else "pending", price=None, error=str(e)[:200])
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -213,6 +229,9 @@ def cancel_all_orders() -> str:
     """Cancel all open orders — throttled 25/min. No args needed. Returns list of cancel results or error."""
     try:
         results = broker_client.cancel_all_orders()
-        return json.dumps({"cancelled": True, "count": len(results) if isinstance(results, list) else 0, "results": results}, default=str)
+        cnt = len(results) if isinstance(results, list) else 0
+        log_event("cancel_all_orders", level="info", order_id="all", price=None, count=cnt, status="cancelled")
+        return json.dumps({"cancelled": True, "count": cnt, "results": results}, default=str)
     except Exception as e:
+        log_event("cancel_all_orders", level="warning", order_id="all", price=None, error=str(e)[:200])
         return json.dumps({"error": str(e), "type": type(e).__name__})
