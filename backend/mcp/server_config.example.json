@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "alpaca": {
+      "command": "npx",
+      "args": ["-y", "@alpacahq/alpaca-mcp-server"],
+      "env": {
+        "ALPACA_API_KEY": "YOUR_PAPER_API_KEY_HERE",
+        "ALPACA_API_SECRET": "YOUR_PAPER_SECRET_HERE",
+        "ALPACA_API_URL": "https://paper-api.alpaca.markets"
+      }
+    }
+  },
+  "_note": "Phase 12 MCP Server config — copy env vars to backend/.env as MCP_SERVER_URL or MCP_SERVER_COMMAND. See backend/mcp/client.py and docs/Agent_Architecture.md §11"
+}

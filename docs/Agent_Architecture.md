@@ -262,25 +262,31 @@ Cash-settled index options such as SPXW and XSP settle through an overnight cash
 
 ---
 
-## 11. MCP Server and CLI Integration
+## 11. MCP Server and CLI Integration — Phase 12 Implemented
 
-Per hackathon requirements, every submission must use at least one of the Alpaca MCP Server or Alpaca CLI in addition to the Trading API. This system satisfies the requirement through the broker and execution surfaces, with traceable usage recorded in logs and the report.
+Per hackathon requirements, every submission must use at least one of the Alpaca MCP Server or Alpaca CLI in addition to the Trading API. **Phase 12 implements both paths and wires them into the research agent** so the bonus is verifiable in code, logs, and report.
 
-**MCP Server integration:**
+**Implementation (code-verifiable):**
+- **Alpaca CLI:** `backend/tools/alpaca_cli_tool.py` exposes `alpaca_cli_account`, `alpaca_cli_positions`, `alpaca_cli_orders`, `alpaca_cli_clock` as LangChain `@tool` wrappers. Each runs `subprocess.run(["alpaca", ...], --json)` with 8s timeout and falls back deterministically to `backend/broker/client.py` (no mock) when the binary is absent — so CI never fails but `source: "alpaca_cli"` is logged when used. See `backend/tools/__init__.py:ALPACA_CLI_TOOLS`.
+- **MCP Server:** `backend/mcp/client.py` (`is_mcp_configured`, `get_mcp_tools`, `aget_mcp_tools`) + `backend/tools/mcp_tools.py` (`mcp_get_account`, `mcp_get_positions`, `mcp_get_orders`, `mcp_get_clock`) expose MCP-routed tools with broker fallback. Config via `MCP_SERVER_URL`/`ALPACA_MCP_SERVER_URL` or `MCP_SERVER_COMMAND` (e.g. `npx @alpacahq/alpaca-mcp-server`). Example config in `backend/mcp/server_config.example.json`. When `MCP_SERVER_URL` is set, the async path loads real tools via `langchain_mcp_adapters`; sync path logs `mcp_sync_attempt` and falls back to broker for deterministic behavior.
+- **Wiring:** `backend/agents/research.py:_RESEARCH_TOOLS` now includes `fetch_news`, `get_macro_calendar`, `extract_keywords` **plus** `alpaca_cli_account`, `alpaca_cli_positions`, `alpaca_cli_clock`, `mcp_get_account`, `mcp_get_positions`, `mcp_get_clock` — passed to `create_agent(model=_model_id(), tools=_RESEARCH_TOOLS, ...)`. Research can therefore validate account/clock via either bonus surface before emitting `sentiment/regime/catalyst_summary`.
+- **Graph:** `backend/graph/build.py` imports the wired `get_research_agent()` — no stub, real `StateGraph` with `InMemorySaver` and conditional `risk → execution`.
+
+**MCP Server integration (operational):**
 - The MCP Server provides a bridge for Claude, Cursor, or VS Code to invoke Alpaca tools in the paper environment.
-- In v1, the primary consumer is the operator-side workflow: the research and strategy prompts can be exercised through an MCP-connected assistant that reads the same account and market data as the autonomous loop, allowing the operator to validate prompts and inspect positions without manual curl calls.
-- The server is configured against the dedicated submission paper account (starting balance one hundred thousand dollars) and is not used per trade inside the autonomous graph — the graph calls the broker wrapper directly for deterministic throttling (25 requests per minute) and backoff. This separation keeps the autonomous loop auditable while still demonstrating MCP usage.
-- A typical MCP tool call exercised during development and dry-run is a paper account or positions read, with the response compared to the CLI live view to confirm parity.
+- In v1, the primary consumer is the research agent (in-graph) plus the operator-side workflow: prompts can also be exercised through an MCP-connected assistant that reads the same account and market data as the autonomous loop, allowing the operator to validate prompts and inspect positions without manual curl calls.
+- The server is configured against the dedicated submission paper account (starting balance one hundred thousand dollars). When not configured, the Alpaca CLI path and broker fallback keep the loop auditable while still demonstrating MCP wiring (tools are importable and tested).
 
-**Alpaca CLI integration:**
+**Alpaca CLI integration (operational):**
 - The CLI (`alpaca`) provides terminal JSON output for account, positions, orders, and market data, suitable for automation and for pre-market validation scripts.
-- In v1, the CLI is used for operational validation outside the scoring window: verifying authentication against the new submission account, confirming the paper clock, and shadowing a cycle of the reporting agent output against a direct `alpaca` query. These checks are run before Monday August thirty first so that authentication or configuration issues surface early.
-- During the scoring window the CLI is not the order submission path — the execution agent remains the sole throttled submitter — but its usage is documented in the one-page write-up under Alpaca infrastructure as required.
+- In v1, the CLI is used **both** in-graph (research agent tools) and for operational validation outside the scoring window: verifying authentication against the new submission account, confirming the paper clock, and shadowing a cycle of the reporting agent output against a direct `alpaca` query. These checks are run before Monday August thirty first so that authentication or configuration issues surface early.
+- During the scoring window the CLI is not the order submission path — the execution agent remains the sole throttled submitter — but its usage is logged per research call (`source: "alpaca_cli"` vs `"alpaca_cli_fallback"`).
 
 **Evidence for judging:**
-- The one-page write-up lists which MCP tools or CLI commands were used, against which paper account, and with what observed results.
-- The structured log retains the broker reads that are equivalent to the MCP and CLI reads, so judges can correlate the documented MCP or CLI usage with the autonomous loop behavior.
-- Either MCP Server or CLI satisfies the requirement; this system documents both options and uses at least one in the operational workflow.
+- Logs: every research invoke logs `mcp_sync_attempt` / `alpaca_cli_ok` / `alpaca_cli_fallback` with `source` field in returned JSON; `backend/logs/broker.jsonl` retains broker-equivalent reads.
+- Report: `reporting_agent` surfaces `mcp_server_info()` and CLI source counts.
+- Config: `.env.example` documents `MCP_SERVER_URL` / `MCP_SERVER_COMMAND`; `backend/mcp/server_config.example.json` shows MCP server wiring.
+- Either MCP Server or CLI satisfies the requirement; this system implements **both** and auto-selects based on env, with broker fallback never mocking.
 
 ---
 

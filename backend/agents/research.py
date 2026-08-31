@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from backend.core.logging import log_event
 from backend.core.system_prompt import RESEARCH_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
+from backend.tools.alpaca_cli_tool import alpaca_cli_account, alpaca_cli_clock, alpaca_cli_orders, alpaca_cli_positions
+from backend.tools.mcp_tools import mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
 from backend.tools.news_tools import extract_keywords, fetch_news, get_macro_calendar
 
 
@@ -29,6 +31,22 @@ class ResearchOutput(BaseModel):
     catalyst_summary: str = Field(default="", description="Concise catalyst summary")
     sentiment_vector: Optional[list] = Field(default=None, description="Optional vector")
 
+
+# Phase 12: Alpaca CLI + MCP Server tools wired into research agent (satisfies hackathon bonus)
+# Research can now read account/positions via CLI or MCP, besides news/macro
+_RESEARCH_TOOLS = [
+    fetch_news,
+    get_macro_calendar,
+    extract_keywords,
+    # Phase 12 — Alpaca CLI (subprocess "alpaca") with broker fallback
+    alpaca_cli_account,
+    alpaca_cli_positions,
+    alpaca_cli_clock,
+    # Phase 12 — MCP Server (when MCP_SERVER_URL set) with broker fallback
+    mcp_get_account,
+    mcp_get_positions,
+    mcp_get_clock,
+]
 
 # Built-in middleware per docs: limits + error handling — single source via core/utils
 _RESEARCH_MIDDLEWARE = [ToolCallLimitMiddleware(thread_limit=20, run_limit=10), handle_tool_errors]
@@ -123,11 +141,13 @@ def validate_research_output(output: Dict[str, Any]) -> Dict[str, Any]:
 def get_research_agent():
     """
     Factory — returns built-in LangChain agent (create_agent) per docs.
+    Phase 12: includes Alpaca CLI + MCP tools so research can validate account/market via
+    either bonus path before emitting sentiment/regime.
     """
     try:
         return create_agent(
             model=_model_id(),
-            tools=[fetch_news, get_macro_calendar, extract_keywords],
+            tools=_RESEARCH_TOOLS,
             system_prompt=RESEARCH_SYSTEM_PROMPT,
             middleware=_RESEARCH_MIDDLEWARE,
         )
@@ -150,7 +170,7 @@ def get_research_agent():
                 )
                 return create_agent(
                     model=fallback,
-                    tools=[fetch_news, get_macro_calendar, extract_keywords],
+                    tools=_RESEARCH_TOOLS,
                     system_prompt=RESEARCH_SYSTEM_PROMPT,
                     middleware=_RESEARCH_MIDDLEWARE,
                 )
