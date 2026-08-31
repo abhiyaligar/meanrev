@@ -58,7 +58,7 @@ def log_event(event: str, level: str = "info", **fields: Any) -> None:
         "level": level,
         **_redact(fields),
     }
-    line = json.dumps(payload, ensure_ascii=False)
+    line = json.dumps(payload, ensure_ascii=False, default=str)
     if level == "error":
         _logger.error(line)
     elif level == "warning":

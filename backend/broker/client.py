@@ -56,11 +56,15 @@ def _create_trading_client() -> TradingClient:
 
 
 def _dump(obj: Any) -> Any:
-    """Normalize alpaca-py model to dict; fallback to raw."""
+    """Normalize alpaca-py model to dict; fallback to raw. Mode json ensures UUID/datetime -> str."""
     if obj is None:
         return None
     if hasattr(obj, "model_dump"):
-        return obj.model_dump()
+        try:
+            # Pydantic v2: mode="json" converts UUID, datetime, Decimal to JSON-compatible primitives
+            return obj.model_dump(mode="json")  # type: ignore
+        except TypeError:
+            return obj.model_dump()
     if hasattr(obj, "dict"):
         return obj.dict()  # type: ignore
     if isinstance(obj, dict):
