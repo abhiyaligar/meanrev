@@ -198,8 +198,8 @@ def get_orders(
             wanted = {s.strip().upper() for s in symbols.split(",") if s.strip()}
             if wanted:
                 dumped = [o for o in dumped if str(o.get("symbol", "")).upper() in wanted]
-                # respect limit after filtering
-                dumped = dumped[:lim]
+        # Always respect limit (clamped) after filtering
+        dumped = dumped[:lim]
         return dumped
 
     return _call_with_retry(_do)

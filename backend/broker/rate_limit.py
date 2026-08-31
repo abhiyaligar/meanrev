@@ -277,7 +277,7 @@ def backoff_delay(attempt: int) -> float:
     delay = BASE_BACKOFF_SECONDS * (2**attempt)
     delay = min(delay, MAX_BACKOFF_SECONDS)
     jitter = random.uniform(-0.2 * delay, 0.2 * delay)
-    return max(0.1, delay + jitter)
+    return max(0.1, min(MAX_BACKOFF_SECONDS, delay + jitter))
 
 
 def is_retryable_exception(exc: Exception) -> bool:

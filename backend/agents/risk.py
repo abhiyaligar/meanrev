@@ -65,12 +65,22 @@ def track_account_state(account: Optional[Dict[str, Any]], positions: Optional[L
     if equity > 0:
         margin_usage = max(0.0, (equity - cash) / equity) if cash < equity else 0.0
 
-    # Peak equity for drawdown — from config or current equity
+    # Peak equity for drawdown — max of last_equity, config, and current equity (true peak)
     s = get_settings()
-    peak = s.risk_peak_equity if s.risk_peak_equity and s.risk_peak_equity > 0 else equity
-    # Ensure peak is at least equity
-    if peak < equity:
-        peak = equity
+    candidates = [equity]
+    try:
+        last_eq_raw = account.get("last_equity") if isinstance(account, dict) else None
+        last_eq = float(last_eq_raw) if last_eq_raw is not None and str(last_eq_raw).strip() != "" else None
+        if last_eq is not None and last_eq > 0:
+            candidates.append(last_eq)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if s.risk_peak_equity and s.risk_peak_equity > 0:
+            candidates.append(float(s.risk_peak_equity))
+    except (TypeError, ValueError):
+        pass
+    peak = max(candidates) if candidates else equity
 
     return {
         "cash": cash,
@@ -100,7 +110,7 @@ def check_position_limit(
     max_pct = max_position_pct if max_position_pct is not None else s.risk_max_position_pct
     if equity <= 0:
         return False, 0.0, f"equity {equity} invalid for position limit"
-    if qty <= 0 or price <= 0:
+    if qty == 0 or price <= 0:
         return False, 0.0, f"qty {qty} or price {price} invalid"
     notional = abs(qty * price)
     ratio = notional / equity
