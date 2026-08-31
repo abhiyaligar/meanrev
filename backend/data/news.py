@@ -198,7 +198,10 @@ def fetch_news(
 def get_macro_calendar(days_ahead: int = 7) -> List[Dict[str, str]]:
     """
     Return upcoming macro catalysts: Fed speeches, NFP, CPI, earnings, benchmark revisions.
-    No mock fallback — if no external calendar API is configured, returns empty with log.
+    Free sources (no paid tier):
+      1) Finnhub economic calendar (US, next 7d) — FINNHUB_API_KEY (free 60/min)
+      2) FRED observations for CPI/NFP (CPIAUCSL, PAYEMS) — FRED_API_KEY (free) or CSV fallback without key
+      3) Zero-key ICS fallback via FRED CSV if no keys set — still returns CPI level for research
     Caller should handle empty as "No data available for this".
     Uses library-backed TTLCache (cachetools) via core/utils.
     """
@@ -206,9 +209,121 @@ def get_macro_calendar(days_ahead: int = 7) -> List[Dict[str, str]]:
     if cached is not None:
         return cached
 
-    # No external calendar API configured for real data — return empty with message
-    # (Previous mock calendar removed per user request: no mock data)
-    log_event("macro_calendar_no_data", reason="No data available for macro calendar (no external API configured)")
+    events: List[Dict[str, str]] = []
+
+    # 1) Finnhub economic calendar (closest to docs: Fed speeches, NFP, CPI)
+    try:
+        from backend.core.config import get_settings
+        import os
+        import requests
+
+        s = get_settings()
+        # Use FRED_API_URL base if needed for search, but for calendar use Finnhub
+        finnhub_key = os.getenv("FINNHUB_API_KEY") or getattr(s, "finnhub_api_key", None)
+        if finnhub_key:
+            # Finnhub calendar returns {economicCalendar:[{event,country,time,actual,estimate,prev}]}
+            r = requests.get("https://finnhub.io/api/v1/calendar/economic", params={"token": finnhub_key}, timeout=8)
+            if r.ok:
+                data = r.json()
+                raw = data.get("economicCalendar") or data.get("economic_calendar") or []
+                # Filter US next 7d
+                cutoff = datetime.now(timezone.utc) + timedelta(days=days_ahead)
+                for e in raw:
+                    if str(e.get("country", "")).upper() not in ("US", "USA", ""):
+                        continue
+                    # Parse time
+                    t = e.get("time") or e.get("date") or ""
+                    try:
+                        dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt > cutoff:
+                            continue
+                    except Exception:
+                        pass
+                    events.append(
+                        {
+                            "event": str(e.get("event") or e.get("name") or "Macro"),
+                            "time": str(t),
+                            "country": "US",
+                            "actual": str(e.get("actual") or ""),
+                            "estimate": str(e.get("estimate") or ""),
+                            "prev": str(e.get("prev") or ""),
+                            "source": "finnhub",
+                        }
+                    )
+                if events:
+                    events = events[:10]
+                    _MACRO_CACHE.set("macro", events)
+                    log_event("macro_calendar_finnhub_ok", count=len(events))
+                    return events
+    except Exception as e:
+        log_event("macro_calendar_finnhub_error", level="warning", error=str(e)[:200])
+
+    # 2) FRED observations for CPI/NFP levels (free, no calendar but latest print)
+    try:
+        import os
+        import requests
+
+        from backend.core.config import get_settings
+
+        s = get_settings()
+        fred_key = os.getenv("FRED_API_KEY") or getattr(s, "fred_api_key", None)
+        if fred_key:
+            for series_id, name in [("CPIAUCSL", "CPI"), ("PAYEMS", "NFP"), ("UNRATE", "Unemployment"), ("FEDFUNDS", "Fed Funds")]:
+                try:
+                    # Use configurable FRED_API_URL
+                    base = getattr(s, "fred_api_url", None) or os.getenv("FRED_API_URL") or "https://api.stlouisfed.org/fred"
+                    base = str(base).rstrip("/")
+                    r = requests.get(
+                        f"{base}/series/observations",
+                        params={"series_id": series_id, "api_key": fred_key, "file_type": "json", "limit": 1, "sort_order": "desc"},
+                        timeout=8,
+                    )
+                    if r.ok:
+                        obs = (r.json().get("observations") or [{}])[0]
+                        events.append(
+                            {
+                                "event": name,
+                                "time": str(obs.get("date") or ""),
+                                "value": str(obs.get("value") or ""),
+                                "source": "fred",
+                                "series_id": series_id,
+                            }
+                        )
+                except Exception:
+                    continue
+            if events:
+                _MACRO_CACHE.set("macro", events[:10])
+                log_event("macro_calendar_fred_ok", count=len(events))
+                return events[:10]
+    except Exception as e:
+        log_event("macro_calendar_fred_error", level="warning", error=str(e)[:200])
+
+    # 3) Zero-key fallback: FRED CSV (no API key, public) for CPI level — 15s timeout (FRED can be slow)
+    try:
+        import os
+        import requests
+
+        from backend.core.config import get_settings
+
+        _s = get_settings()
+        csv_base = getattr(_s, "fred_csv_url", None) or os.getenv("FRED_CSV_URL") or "https://fred.stlouisfed.org/graph/fredgraph.csv"
+        r = requests.get(csv_base, params={"id": "CPIAUCSL"}, timeout=15, headers={"User-Agent": "meanrev/1.0"})
+        if r.ok and "DATE" in r.text:
+            lines = r.text.strip().splitlines()
+            if len(lines) >= 2:
+                last = lines[-1].split(",")
+                if len(last) >= 2 and last[1] not in (".", ""):
+                    events.append({"event": "CPI", "time": last[0], "value": last[1], "source": "fred_csv"})
+                    _MACRO_CACHE.set("macro", events)
+                    log_event("macro_calendar_fred_csv_ok", count=len(events))
+                    return events
+    except Exception as e:
+        log_event("macro_calendar_fred_csv_error", level="warning", error=str(e)[:200])
+
+    # No free source configured or all failed — return empty with log (research handles as "No data available")
+    log_event("macro_calendar_no_data", reason="No data available for macro calendar (set FRED_API_KEY or FINNHUB_API_KEY in .env for free calendar; zero-key CSV also tried)")
     _MACRO_CACHE.set("macro", [])
     return []
 

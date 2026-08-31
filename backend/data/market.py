@@ -559,11 +559,14 @@ def fetch_option_chain(
     limit: int = 20,
 ) -> List[Dict[str, object]]:
     """
-    Fetch options chain for underlying. Tries Alpaca OptionHistoricalDataClient,
-    falls back to deterministic mock with indicative Greeks so every strategy
-    can include options (hackathon requirement).
+    Fetch options chain for underlying — docs-correct via Trading API (not OPRA historical).
 
-    Returns list of {symbol, underlying, strike, expiration, type, last_price, greeks}
+    Per https://docs.alpaca.markets/us/docs/options-trading :
+      GET /v2/options/contracts?underlying_symbols=  (paper enabled by default, level 1-3)
+      Returns {option_contracts:[{symbol: OCC AAPL240119C00100000, expiration_date, strike_price, type, tradable, ...}], page_token}
+    Falls back to empty with log if contracts unavailable (not OPRA mock). Wired to option_tools.get_option_contracts logic.
+
+    Returns list of {symbol, underlying, strike, expiration, type, last_price, greeks} (greeks via _black_scholes if needed)
     """
     if not underlying or not underlying.strip():
         return []
@@ -576,7 +579,7 @@ def fetch_option_chain(
         lim = 1
     lim = min(lim, 100)
 
-    # Try Alpaca options client
+    # Docs-correct: Trading API contracts (not OptionHistoricalDataClient which needs OPRA)
     try:
         from backend.core.config import get_settings
 
@@ -584,40 +587,106 @@ def fetch_option_chain(
         key = s.get_key()
         secret = s.get_secret()
         if key and secret:
-            # Attempt options client — package path varies by alpaca-py version
-            OptionClient = None
+            # Try TradingClient.get_option_contracts (preferred) — per docs Enablement paper has level 1-3
             try:
-                from alpaca.data.historical.option import OptionHistoricalDataClient  # type: ignore
+                from alpaca.trading.client import TradingClient
+                from alpaca.trading.requests import GetOptionContractsRequest  # type: ignore
 
-                OptionClient = OptionHistoricalDataClient
-            except Exception:
-                try:
-                    from alpaca.data.historical import OptionHistoricalDataClient  # type: ignore
-
-                    OptionClient = OptionHistoricalDataClient
-                except Exception:
-                    OptionClient = None
-
-            if OptionClient is not None:
-                # Throttle shared bucket
+                # Throttle
                 try:
                     bucket.consume(1)
-                except RateLimitExceeded:
-                    pass  # return mock below
-                else:
-                    client = OptionClient(api_key=key, secret_key=secret)  # type: ignore
-                    # For hackathon, use mock shape if data not available; real fetch would be:
-                    # from alpaca.data.requests import OptionChainRequest, OptionSnapshotRequest
-                    # Real call omitted to avoid free-tier OPRA requirement — mock provides indicative data
-                    raise NotImplementedError("OPRA options data requires subscription — using mock Greeks")
+                except RateLimitExceeded as e:
+                    log_event("option_chain_rate_limited", level="warning", underlying=sym, retry_after=e.retry_after)
+                    return []
+
+                client = TradingClient(api_key=key, secret_key=secret, paper=True, url_override=s.alpaca_api_url.rstrip("/").removesuffix("/v2") if s.alpaca_api_url else None)  # type: ignore
+                if hasattr(client, "get_option_contracts"):
+                    req_kwargs: Dict[str, Any] = {"underlying_symbols": [sym], "limit": lim}
+                    if expiration:
+                        req_kwargs["expiration_date"] = expiration  # some versions use expiration_date, others gte/lte
+                        req_kwargs["expiration_date_gte"] = expiration
+                        req_kwargs["expiration_date_lte"] = expiration
+                    req = GetOptionContractsRequest(**req_kwargs)  # type: ignore
+                    resp = client.get_option_contracts(req)  # type: ignore
+                    # Normalize
+                    if hasattr(resp, "model_dump"):
+                        data = resp.model_dump(mode="json")  # type: ignore
+                    elif isinstance(resp, dict):
+                        data = resp
+                    else:
+                        data = {"option_contracts": list(resp) if isinstance(resp, list) else []}
+                    contracts = data.get("option_contracts") or data.get("contracts") or []
+                    if contracts:
+                        # Map to chain shape expected by strategy (add Greeks placeholder)
+                        chain = []
+                        for c in contracts[:lim]:
+                            occ = c.get("symbol") or c.get("id") or ""
+                            chain.append(
+                                {
+                                    "symbol": occ,
+                                    "underlying": c.get("underlying_symbol") or sym,
+                                    "strike": c.get("strike_price") or c.get("strike"),
+                                    "expiration": c.get("expiration_date") or expiration,
+                                    "type": c.get("type") or ("call" if "C" in str(occ) else "put"),
+                                    "last_price": c.get("close_price") or c.get("last_price"),
+                                    "tradable": c.get("tradable", True),
+                                    "contract": c,
+                                }
+                            )
+                        log_event("option_chain_ok", underlying=sym, count=len(chain), via="trading_api")
+                        return chain  # type: ignore
+            except Exception as e:
+                # GetOptionContractsRequest may not exist in this alpaca-py version — try raw REST fallback
+                if "GetOptionContractsRequest" not in str(type(e).__name__) and "option_contract" not in str(e).lower():
+                    log_event("option_chain_trading_error", level="warning", underlying=sym, error=str(e)[:200])
+
+            # Fallback: raw REST GET /v2/options/contracts?underlying_symbols=
+            try:
+                import requests
+
+                base = s.alpaca_api_url.rstrip("/")
+                if base.endswith("/v2"):
+                    base = base[:-3]
+                headers = {"APCA-API-KEY-ID": key or "", "APCA-API-SECRET-KEY": secret or ""}
+                params: Dict[str, Any] = {"underlying_symbols": sym, "limit": lim}
+                if expiration:
+                    params["expiration_date_gte"] = expiration
+                    params["expiration_date_lte"] = expiration
+                # Throttle
+                try:
+                    bucket.consume(1)
+                except RateLimitExceeded as e:
+                    log_event("option_chain_rate_limited", level="warning", underlying=sym, retry_after=e.retry_after)
+                    return []
+                resp = requests.get(f"{base}/v2/options/contracts", headers=headers, params=params, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                contracts = data.get("option_contracts") or []
+                if contracts:
+                    chain = []
+                    for c in contracts[:lim]:
+                        chain.append(
+                            {
+                                "symbol": c.get("symbol"),
+                                "underlying": c.get("underlying_symbol") or sym,
+                                "strike": c.get("strike_price"),
+                                "expiration": c.get("expiration_date"),
+                                "type": c.get("type"),
+                                "last_price": c.get("close_price"),
+                                "tradable": c.get("tradable", True),
+                                "contract": c,
+                            }
+                        )
+                    log_event("option_chain_ok", underlying=sym, count=len(chain), via="rest")
+                    return chain  # type: ignore
+            except Exception as e:
+                log_event("option_chain_rest_error", level="warning", underlying=sym, error=str(e)[:200])
     except Exception as e:
-        # Log once, then fall through to mock
         if "OPRA" not in str(e):
             log_event("option_chain_alpaca_error", level="warning", underlying=sym, error=str(e)[:200])
 
-    # No mock fallback — OPRA requires subscription, free-tier has no options data
-    # If Alpaca options client not available or not subscribed, return empty with log
-    log_event("option_chain_no_data", underlying=sym, reason="No data available for this underlying/expiration (OPRA subscription required, free-tier has no options chain)")
+    # No contracts found — free-tier paper has contracts (level 3) but this underlying may have none
+    log_event("option_chain_no_data", underlying=sym, reason="No data available for this underlying/expiration (Trading API returned 0; check underlying_symbols and level)")
     return []
 
 

@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     scheduler_thread_id: str = Field(default="scheduler", alias="SCHEDULER_THREAD_ID", description="LangGraph thread_id for scheduler ticks (prior_regime continuity)")
     scheduler_prompt: str = Field(default="Do Research On BTC/USD And Propose a Order", alias="SCHEDULER_PROMPT", description="Prompt for scheduler ticks")
 
+    # --- Macro data (free) — FRED + Finnhub + BLS (optional, no paid tier) ---
+    fred_api_key: Optional[str] = Field(default=None, alias="FRED_API_KEY", description="FRED API key (free at https://fred.stlouisfed.org/docs/api/api_key.html) for CPI, NFP, etc.")
+    fred_api_url: str = Field(default="https://api.stlouisfed.org/fred", alias="FRED_API_URL", description="FRED API base URL")
+    fred_csv_url: str = Field(default="https://fred.stlouisfed.org/graph/fredgraph.csv", alias="FRED_CSV_URL", description="FRED CSV fallback URL (no auth)")
+    finnhub_api_key: Optional[str] = Field(default=None, alias="FINNHUB_API_KEY", description="Finnhub API key (free at https://finnhub.io) for economic calendar")
+    bls_api_key: Optional[str] = Field(default=None, alias="BLS_API_KEY", description="BLS API key (optional, https://api.bls.gov)")
+
     # --- Optional infra ---
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
 
@@ -156,12 +163,16 @@ class Settings(BaseSettings):
             }
         if provider == "modal":
             endpoint_url = self.modal_endpoint_url or os.getenv("MODAL_ENDPOINT_URL") or "https://yaligarabhishek6--ep-glm-5-3-server.us-west.modal.direct"
+            # Ensure OpenAI-compatible base_url ends with /v1 (Modal proxy expects /v1/chat/completions)
+            base_url = endpoint_url.rstrip("/")
+            if not base_url.endswith("/v1"):
+                base_url = base_url + "/v1"
             proxy_token = self.modal_proxy_token or os.getenv("MODAL_PROXY_TOKEN")
             token_id = self.modal_token_id or os.getenv("MODAL_TOKEN_ID")
             return {
                 "provider": "modal",
                 "api_key": proxy_token or token_id,  # for OpenAI-compatible init_chat_model: Authorization: Bearer <proxy_token>
-                "base_url": endpoint_url,
+                "base_url": base_url,
                 "token_id": token_id or os.getenv("MODAL_TOKEN_ID"),
                 "token_secret": self.modal_token_secret or os.getenv("MODAL_TOKEN_SECRET"),
                 "environment": self.modal_environment,

@@ -21,8 +21,9 @@ from .broker_tools import (
 from .market_tools import align_timeframes_tool, detect_arbitrage, get_market_snapshot, get_ohlcv, get_option_chain
 from .mcp_tools import MCP_TOOLS, mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
 from .news_tools import extract_keywords, fetch_news, get_macro_calendar
+from .option_tools import get_option_chain_docs, get_option_contracts, place_option_order
 
-# Flat list for create_agent(tools=TOOLS)
+# Flat list for create_agent(tools=TOOLS) — 27 total (25 + 2 option docs-correct)
 TOOLS = [
     get_account,
     get_positions,
@@ -50,16 +51,20 @@ TOOLS = [
     mcp_get_positions,
     mcp_get_orders,
     mcp_get_clock,
+    # Docs-correct options (per https://docs.alpaca.markets/us/docs/options-trading) — NOT OPRA historical
+    get_option_contracts,
+    place_option_order,
 ]
 
 # Sub-groupings for per-agent wiring
 BROKER_TOOLS = [get_account, get_positions, get_orders, get_clock]
-# Sensitive write tools — require HumanInTheLoopMiddleware (all order-mutating)
-BROKER_WRITE_TOOLS = [submit_order, set_stop_loss, modify_order, cancel_order, cancel_all_orders]
+# Sensitive write tools — require HumanInTheLoopMiddleware (all order-mutating, incl. options)
+BROKER_WRITE_TOOLS = [submit_order, set_stop_loss, modify_order, cancel_order, cancel_all_orders, place_option_order]
 MARKET_TOOLS = [get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage]
 NEWS_TOOLS = [fetch_news, get_macro_calendar, extract_keywords]
 ALPACA_CLI_TOOLS = ALPACA_CLI_TOOLS
 MCP_TOOLS = MCP_TOOLS
+OPTION_TOOLS = [get_option_contracts, place_option_order, get_option_chain_docs]
 
 __all__ = [
     "TOOLS",
@@ -69,6 +74,7 @@ __all__ = [
     "NEWS_TOOLS",
     "ALPACA_CLI_TOOLS",
     "MCP_TOOLS",
+    "OPTION_TOOLS",
     "get_account",
     "get_positions",
     "get_orders",
@@ -94,4 +100,7 @@ __all__ = [
     "mcp_get_positions",
     "mcp_get_orders",
     "mcp_get_clock",
+    "get_option_contracts",
+    "place_option_order",
+    "get_option_chain_docs",
 ]

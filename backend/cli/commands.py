@@ -200,7 +200,7 @@ def handle_help(args: str = "") -> Dict[str, Any]:
         "  /help                — this help\n"
         "  /quit, /exit         — exit CLI\n"
         "Natural language (no slash) → routed to graph as instruction (e.g., 'be more conservative today', 'explain last trade')\n"
-        "Prompts are from backend/core/system_prompt.py (<1000 tokens) and models from LLM_MODEL_* in .env"
+        "Prompts are from backend/core/system_prompt.py (<10000 tokens) and models from LLM_MODEL_* in .env"
     )
     return {"output": text, "data": {}}
 

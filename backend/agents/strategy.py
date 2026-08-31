@@ -213,7 +213,8 @@ def get_strategy_agent(checkpointer=None):
             checkpointer=checkpointer,
         )
     except Exception as e:
-        if "langchain-openrouter" in str(e) or "langchain-groq" in str(e).lower():
+        err_lower = str(e).lower()
+        if any(k in err_lower for k in ("langchain-openrouter", "langchain-groq", "unable to infer", "model_provider", "glm-5.3", "modal")):
             try:
                 from langchain.chat_models import init_chat_model
 
@@ -225,8 +226,8 @@ def get_strategy_agent(checkpointer=None):
                 fallback = init_chat_model(
                     model_name,
                     model_provider="openai",
-                    api_key=cfg.get("api_key"),
-                    base_url=cfg.get("base_url"),
+                    api_key=cfg.get("api_key") or cfg.get("proxy_token"),
+                    base_url=cfg.get("base_url") or cfg.get("endpoint_url"),
                     temperature=0.5,
                 )
                 if checkpointer is None:
@@ -287,18 +288,40 @@ def strategy_agent(state: dict) -> dict:
                 raise RuntimeError("strategy agent not available")
 
             research_out = state.get("research", {})
-            # Build prompt and enforce token limit (9.1) — central template from system_prompt.py, no hardcoded string
-            base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
+            # Build prompt and enforce token limit (9.1) — central template with {research,user_request} — 10k limit
+            # Extract user_request for template
+            user_req = ""
+            try:
+                msgs = state.get("messages", [])
+                if msgs:
+                    last = msgs[-1]
+                    user_req = last.get("content") if isinstance(last, dict) else getattr(last, "content", "") or ""
+                    user_req = str(user_req)[:1500]
+            except Exception:
+                user_req = ""
+            try:
+                if "{user_request}" in GRAPH_STRATEGY_PROMPT_TEMPLATE:
+                    base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out, user_request=user_req or "general")
+                else:
+                    base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
+            except KeyError:
+                base_prompt = f"Research: {research_out}. User request: {user_req}. Synthesize and propose trade."
             # Count tokens and truncate research if needed
             full_prompt = f"{STRATEGY_SYSTEM_PROMPT}\n\n{base_prompt}"
             model_id = _model_id()
-            if count_tokens(full_prompt, model_id) > 1000:
+            if count_tokens(full_prompt, model_id) > 10000:
                 # Truncate research catalyst
                 if isinstance(research_out, dict) and "catalyst_summary" in research_out:
                     research_out = dict(research_out)
                     research_out["catalyst_summary"] = str(research_out["catalyst_summary"])[:500] + "...[truncated]"
-                    base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
-                    base_prompt = enforce_token_limit(base_prompt, 1000, model_id)
+                    try:
+                        if "{user_request}" in GRAPH_STRATEGY_PROMPT_TEMPLATE:
+                            base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out, user_request=user_req or "general")
+                        else:
+                            base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
+                    except KeyError:
+                        base_prompt = f"Research: {research_out}. User request: {user_req}."
+                    base_prompt = enforce_token_limit(base_prompt, 10000, model_id)
 
             msgs = state.get("messages", []) + [{"role": "user", "content": base_prompt}]
             result = agent.invoke({"messages": msgs})

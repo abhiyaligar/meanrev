@@ -76,8 +76,8 @@ def _enforce_token_limit_for_graph(state: Dict) -> Dict:
         prompt_text = " ".join(
             (m.get("content") if isinstance(m, dict) else getattr(m, "content", str(m))) for m in msgs
         )
-        # Check against 1000, truncate oldest messages if needed
-        if count_tokens(prompt_text) > 1000:
+        # Check against 10000, truncate oldest messages if needed (was 1000, now 10k)
+        if count_tokens(prompt_text) > 10000:
             # Keep last 3 messages + system
             if len(msgs) > 3:
                 state["messages"] = msgs[-3:]
@@ -85,7 +85,7 @@ def _enforce_token_limit_for_graph(state: Dict) -> Dict:
             # Also enforce via utils
             for m in state["messages"]:
                 if isinstance(m, dict) and "content" in m:
-                    m["content"] = enforce_token_limit(str(m["content"]), 800)
+                    m["content"] = enforce_token_limit(str(m["content"]), 8000)
                 elif hasattr(m, "content"):
                     try:
                         m.content = enforce_token_limit(str(m.content), 800)

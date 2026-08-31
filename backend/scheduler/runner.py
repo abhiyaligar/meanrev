@@ -103,10 +103,10 @@ def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optiona
         result = g.invoke(state_in, config={"configurable": {"thread_id": use_thread}})
 
         latency_ms = (time.monotonic() - start) * 1000
-        risk = result.get("risk", {}) if isinstance(result, dict) else {}
-        execution = result.get("execution", {}) if isinstance(result, dict) else {}
-        risk_decision = str(risk.get("decision", "unknown"))
-        exec_status = str(execution.get("status", "unknown"))
+        risk = (result.get("risk") or {}) if isinstance(result, dict) else {}
+        execution = (result.get("execution") or {}) if isinstance(result, dict) else {}
+        risk_decision = str(risk.get("decision", "unknown")) if isinstance(risk, dict) else "unknown"
+        exec_status = str(execution.get("status", "unknown")) if isinstance(execution, dict) else "unknown"
         last_status = f"risk:{risk_decision} exec:{exec_status}"
 
         # 4. Persist

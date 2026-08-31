@@ -16,6 +16,7 @@ from backend.core.logging import log_event
 from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, RESEARCH_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.alpaca_cli_tool import alpaca_cli_account, alpaca_cli_clock, alpaca_cli_orders, alpaca_cli_positions
+from backend.tools.fred_tools import search_fred_series
 from backend.tools.mcp_tools import mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
 from backend.tools.news_tools import extract_keywords, fetch_news, get_macro_calendar
 
@@ -34,10 +35,12 @@ class ResearchOutput(BaseModel):
 
 # Phase 12: Alpaca CLI + MCP Server tools wired into research agent (satisfies hackathon bonus)
 # Research can now read account/positions via CLI or MCP, besides news/macro
+# + FRED search for free macro series discovery (e.g. search_fred_series("canada"))
 _RESEARCH_TOOLS = [
     fetch_news,
     get_macro_calendar,
     extract_keywords,
+    search_fred_series,
     # Phase 12 — Alpaca CLI (subprocess "alpaca") with broker fallback
     alpaca_cli_account,
     alpaca_cli_positions,
@@ -152,7 +155,9 @@ def get_research_agent():
             middleware=_RESEARCH_MIDDLEWARE,
         )
     except Exception as e:
-        if "langchain-openrouter" in str(e) or "langchain-groq" in str(e).lower():
+        # Fallback for providers that need explicit init_chat_model (openrouter/groq/modal/glm)
+        err_lower = str(e).lower()
+        if any(k in err_lower for k in ("langchain-openrouter", "langchain-groq", "unable to infer", "model_provider", "glm-5.3", "modal")):
             try:
                 from langchain.chat_models import init_chat_model
 
@@ -160,12 +165,13 @@ def get_research_agent():
 
                 s = get_settings()
                 cfg = s.llm_provider_config()
+                # For modal proxy (GLM), base_url is endpoint URL, api_key is proxy Bearer token, model is glm-5.3
                 model_name = s.get_model("research")
                 fallback = init_chat_model(
                     model_name,
                     model_provider="openai",
-                    api_key=cfg.get("api_key"),
-                    base_url=cfg.get("base_url"),
+                    api_key=cfg.get("api_key") or cfg.get("proxy_token"),
+                    base_url=cfg.get("base_url") or cfg.get("endpoint_url"),
                     temperature=0.5,
                 )
                 return create_agent(
@@ -190,14 +196,29 @@ def research_agent(state: dict) -> dict:
     prior_regime = get_prior_regime(state)
     prior_note = f" Prior regime: {prior_regime} (for continuity)." if prior_regime else ""
 
-    # Build prompt with token limit (10.1) — base from central system_prompt.py (no hardcoded string)
-    base_prompt = f"{GRAPH_RESEARCH_PROMPT}{prior_note}"
+    # Build prompt with token limit (10.1) — base from central system_prompt.py (no hardcoded string) — 10k limit
+    # Extract user_request for GRAPH_RESEARCH_PROMPT {user_request} placeholder (fallback to last message)
+    try:
+        msgs = state.get("messages", [])
+        user_req = ""
+        if msgs:
+            last = msgs[-1]
+            user_req = last.get("content") if isinstance(last, dict) else getattr(last, "content", "") or ""
+            user_req = str(user_req)[:1000]
+        # Safely format — if template has {user_request}, fill it; else just concat
+        if "{user_request}" in GRAPH_RESEARCH_PROMPT:
+            graph_part = GRAPH_RESEARCH_PROMPT.format(user_request=user_req or "general market research")
+        else:
+            graph_part = GRAPH_RESEARCH_PROMPT
+    except Exception:
+        graph_part = GRAPH_RESEARCH_PROMPT
+    base_prompt = f"{graph_part}{prior_note}"
     full_prompt = f"{RESEARCH_SYSTEM_PROMPT}\n\n{base_prompt}"
     model_id = _model_id()
-    if count_tokens(full_prompt, model_id) > 1000:
-        # Truncate research system prompt tail if needed (should not happen with <1000 base, but for safety)
-        base_prompt = enforce_token_limit(base_prompt, 800, model_id)
-        full_prompt = enforce_token_limit(full_prompt, 1000, model_id)
+    if count_tokens(full_prompt, model_id) > 10000:
+        # Truncate research system prompt tail if needed (should not happen with <10000 base, but for safety)
+        base_prompt = enforce_token_limit(base_prompt, 8000, model_id)
+        full_prompt = enforce_token_limit(full_prompt, 10000, model_id)
 
     try:
         from backend.core.config import get_settings

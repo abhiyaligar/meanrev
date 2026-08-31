@@ -103,7 +103,7 @@ def count_tokens(text: str, model_id: Optional[str] = None) -> int:
         return max(1, len(text) // 4)
 
 
-def enforce_token_limit(prompt: str, max_tokens: int = 1000, model_id: Optional[str] = None) -> str:
+def enforce_token_limit(prompt: str, max_tokens: int = 10000, model_id: Optional[str] = None) -> str:
     """Truncate prompt to fit max_tokens, preserving head/tail. Replaces 2x duplicated in research/strategy."""
     tokens = count_tokens(prompt, model_id)
     if tokens <= max_tokens:

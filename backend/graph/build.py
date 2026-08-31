@@ -214,7 +214,30 @@ def build_graph(checkpointer=None):
         def strategy_node(state: Any) -> Dict[str, Any]:
             s = _to_dict(state)
             research_out = s.get("research", {})
-            prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
+            # Extract user_request for template (Top25 list) — fallback to last message
+            user_req = ""
+            try:
+                msgs = s.get("messages", [])
+                if msgs:
+                    last = msgs[-1]
+                    user_req = last.get("content") if isinstance(last, dict) else getattr(last, "content", "") or ""
+                    user_req = str(user_req)[:1500]
+                    # If last is already the research prompt, go one back
+                    if "Research output:" in user_req and len(msgs) > 1:
+                        prev = msgs[-2]
+                        user_req = prev.get("content") if isinstance(prev, dict) else getattr(prev, "content", "") or ""
+                        user_req = str(user_req)[:1500]
+            except Exception:
+                user_req = ""
+            # Safely format — handle both old {research} only and new {research,user_request}
+            try:
+                if "{user_request}" in GRAPH_STRATEGY_PROMPT_TEMPLATE:
+                    prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out, user_request=user_req or "general")
+                else:
+                    prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
+            except KeyError as e:
+                # Fallback if template missing keys
+                prompt = f"Research: {research_out}. User request: {user_req}. Synthesize and propose trade."
             msgs = s.get("messages", []) + [{"role": "user", "content": prompt}]
             result = strategy_agent.invoke({"messages": msgs})
             last = result.get("messages", [{}])[-1]
