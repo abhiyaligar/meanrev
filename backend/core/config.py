@@ -44,10 +44,14 @@ class Settings(BaseSettings):
     groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
 
-    # Modal
+    # Modal — proxy GLM endpoint (yaligarabhishek6--ep-glm-5-3-server)
     modal_token_id: Optional[str] = Field(default=None, alias="MODAL_TOKEN_ID")
     modal_token_secret: Optional[str] = Field(default=None, alias="MODAL_TOKEN_SECRET")
     modal_environment: str = Field(default="main", alias="MODAL_ENVIRONMENT")
+    modal_endpoint_id: Optional[str] = Field(default=None, alias="MODAL_ENDPOINT_ID", description="Modal endpoint ID, e.g. ep-Ue2TlinRcqHUly46fnVi3Z")
+    modal_endpoint_url: Optional[str] = Field(default=None, alias="MODAL_ENDPOINT_URL", description="Modal endpoint URL, e.g. https://yaligarabhishek6--ep-glm-5-3-server.us-west.modal.direct")
+    modal_proxy_token_id: Optional[str] = Field(default=None, alias="MODAL_PROXY_TOKEN_ID", description="Modal proxy token ID for Authorization header")
+    modal_proxy_token: Optional[str] = Field(default=None, alias="MODAL_PROXY_TOKEN", description="Modal proxy Bearer token — Authorization: Bearer <token>, never logged")
 
     # Direct fallback keys
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
@@ -151,16 +155,26 @@ class Settings(BaseSettings):
                 "base_url": self.groq_base_url,
             }
         if provider == "modal":
+            endpoint_url = self.modal_endpoint_url or os.getenv("MODAL_ENDPOINT_URL") or "https://yaligarabhishek6--ep-glm-5-3-server.us-west.modal.direct"
+            proxy_token = self.modal_proxy_token or os.getenv("MODAL_PROXY_TOKEN")
+            token_id = self.modal_token_id or os.getenv("MODAL_TOKEN_ID")
             return {
                 "provider": "modal",
-                "token_id": self.modal_token_id or os.getenv("MODAL_TOKEN_ID"),
+                "api_key": proxy_token or token_id,  # for OpenAI-compatible init_chat_model: Authorization: Bearer <proxy_token>
+                "base_url": endpoint_url,
+                "token_id": token_id or os.getenv("MODAL_TOKEN_ID"),
                 "token_secret": self.modal_token_secret or os.getenv("MODAL_TOKEN_SECRET"),
                 "environment": self.modal_environment,
+                "endpoint_id": self.modal_endpoint_id or os.getenv("MODAL_ENDPOINT_ID") or "ep-Ue2TlinRcqHUly46fnVi3Z",
+                "endpoint_url": endpoint_url,
+                "proxy_token_id": self.modal_proxy_token_id or os.getenv("MODAL_PROXY_TOKEN_ID"),
+                "proxy_token": proxy_token,
             }
         return {"provider": provider}
 
     def is_llm_configured(self) -> bool:
         """True only if selected provider has its explicit credential available.
+        Modal is considered configured if either token pair OR proxy token + endpoint is present.
         """
         cfg = self.llm_provider_config()
         if cfg["provider"] == "openrouter":
@@ -168,7 +182,9 @@ class Settings(BaseSettings):
         if cfg["provider"] == "groq":
             return bool(cfg.get("api_key"))
         if cfg["provider"] == "modal":
-            return bool(cfg.get("token_id") and cfg.get("token_secret"))
+            has_tokens = bool(cfg.get("token_id") and cfg.get("token_secret"))
+            has_proxy = bool(cfg.get("proxy_token") and cfg.get("endpoint_url"))
+            return has_tokens or has_proxy
         return False
 
 
