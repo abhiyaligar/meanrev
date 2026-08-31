@@ -6,7 +6,7 @@
 **Official scoring window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Paper account starting balance for judging:** 100,000 dollars in a new dedicated paper account  
 **Evaluation focus:** Total equity change during the scoring window plus creativity, autonomy, and robustness of the agent workflow. Profit and loss matters but is not the sole factor. A user interface is not required per Alpaca.  
-**Last Updated:** Phase 11 + `meanrev` single command — `pyproject.toml` + `meanrev`/`meanrev.bat` + `How_To_use.md` flag table; prior: Phase 9 Strategy `count_tokens<1000` + options + `ATR` sizing + instruction hook; Risk `RISK_MAX_*` + breaker; Execution `auto` vs `hitl` + `submit_order`; Reporting 5-section + export; `System_Prompt` central + `utils` DRY
+**Last Updated:** Phase 12 — MCP Server + Alpaca CLI wired into research agent (TOOLS 12→21: `alpaca_cli_*` + `mcp_*` with broker fallback, `backend/mcp/` + `server_config.example.json`), no-mock `No data available...`; prior: Phase 11 `meanrev` single command, Phase 9 Strategy `count_tokens<1000` + options + ATR
 
 ---
 
@@ -133,8 +133,8 @@ Natural-language instructions from the CLI can modulate behavior at the top of t
 ### 6.8 Alpaca Integration Compliance
 
 - The agent must trade autonomously via the Trading API, not through manual order entry.
-- The system must use at least one of the Alpaca MCP Server or Alpaca CLI as part of its workflow.
-- Every strategy must incorporate options trading.
+- The system must use at least one of the Alpaca MCP Server or Alpaca CLI as part of its workflow — **Phase 12 implements both**: `backend/tools/alpaca_cli_tool.py` (4 tools via `subprocess alpaca --json` + broker fallback) and `backend/tools/mcp_tools.py` + `backend/mcp/client.py` (4 tools via MCP bridge when `MCP_SERVER_URL`/`MCP_SERVER_COMMAND` set + broker fallback), wired into `backend/agents/research.py:_RESEARCH_TOOLS` (9 tools) and verified via `source: "alpaca_cli"` vs `"alpaca_cli_fallback"` / `"mcp"` vs `"mcp_fallback"` logs. Config template `backend/mcp/server_config.example.json` + `.env.example` `MCP_SERVER_URL`.
+- Every strategy must incorporate options trading (`ensure_options_in_decision` + `fetch_option_chain`).
 
 ### 6.9 Evaluation Support
 
@@ -160,14 +160,16 @@ Natural-language instructions from the CLI can modulate behavior at the top of t
 
 The backend is layered to mirror the agent graph:
 
-- **CLI layer** for interaction and live observation.
-- **Orchestration layer** for LangGraph sequencing and state validation.
-- **Agent layer** for the five specialized nodes.
-- **Broker layer** for throttled Alpaca connectivity.
-- **Data layer** for market data and news preparation plus indicator computation.
-- **Core layer** for configuration, domain models, and structured logging.
+- **CLI layer** for interaction and live observation (`meanrev` via `pyproject.toml`).
+- **Orchestration layer** for LangGraph sequencing and state validation (`StateGraph` + `InMemorySaver`).
+- **Agent layer** for the five specialized nodes (research now 9 tools incl. `alpaca_cli_*` + `mcp_*` for Phase 12).
+- **Broker layer** for throttled Alpaca connectivity (25/min Lua + `tenacity` + 30s timeout, `submit_order` market/limit/stop/options+crypto).
+- **Data layer** for market data and news preparation plus indicator computation (OHLCV no-mock: `No data available...` + `BTC/ETH` derived).
+- **Tool layer** 21 tools: 5 broker + 5 market (incl. `detect_arbitrage`) + 3 news + 4 Alpaca CLI + 4 MCP, all with broker fallback, wired via `backend/tools/__init__.py:TOOLS`.
+- **MCP bridge** (`backend/mcp/`) for Phase 12 bonus — SSE or stdio MCP Server → LangChain tools.
+- **Core layer** for configuration (`LLM_PROVIDER`, `LLM_MODEL_*`, `MCP_SERVER_URL`), domain models, and structured logging (`source` tags).
 
-Persistence in v1 is flat-file JSON-line logs as the primary audit trail. PostgreSQL with TimescaleDB is optional and deferred. Redis provides the token bucket and optional inter-stage publish and subscribe. No web server or frontend build chain exists in v1.
+Persistence in v1 is flat-file JSON-line logs as the primary audit trail (`logs/broker.jsonl` + `.paused`). PostgreSQL with TimescaleDB is optional and deferred. Redis provides the token bucket and optional inter-stage publish and subscribe. No web server or frontend build chain exists in v1.
 
 Data consumed by the system spans price and volume with multi-timeframe VWAP, technical indicators including RSI, MACD, EMA variants, Bollinger Bands, and ATR, macro catalyst data, sentiment metrics, and account and risk state including unrealized and realized profit and loss, margin usage, cash balance, and drawdown versus threshold.
 

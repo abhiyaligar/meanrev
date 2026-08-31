@@ -105,7 +105,7 @@ python -m backend.cli --mode hitl --thread-id dry-run-01 --dry-run
 | `be more conservative today` | `strategy.apply_instruction` via `repl._apply_instruction_hook` | Sets `state["strategy_conservatism"]=0.5` → next `strategy` `qty = min(equity*0.01/ATR, equity*0.15/price)*0.5`, `stop` wider |
 | `go more aggressive` | same | `conservatism=1.5` → larger `qty`, tighter `stop` |
 | `explain last trade` | same | Sets `state["strategy_explain"]` → next turn returns last `strategy.rationale` without new order |
-| Any other text (e.g., `What's the outlook for AAPL?`) | `graph/build.build_graph().invoke({"messages":[{"role":"user","content":text}]}, config={"configurable":{"thread_id":...}})` | `research` (news) → `strategy` (market+options) → `risk` (deterministic) → `execution` (HITL or auto) with `rich.live.Live` streaming `research→strategy→risk→execution` while persisting to `logs/broker.jsonl`; `count_tokens` + `enforce_token_limit` keeps prompt `<1000` |
+| Any other text (e.g., `What's the outlook for AAPL?`) | `graph/build.build_graph().invoke({"messages":[{"role":"user","content":text}]}, config={"configurable":{"thread_id":...}})` | `research` (news + `alpaca_cli_*` + `mcp_*` → broker fallback, no mock) → `strategy` (market+options + `No data available...` on empty) → `risk` (deterministic) → `execution` (HITL or auto) with `rich.live.Live` streaming `research→strategy→risk→execution` while persisting to `logs/broker.jsonl`; `count_tokens` + `enforce_token_limit` keeps prompt `<1000` |
 
 **Live streaming (11b):** `repl._run_graph_with_streaming` uses `rich.live.Live` + `rich.table.Table` to show each step as it completes; same events are `log_event` to `broker.jsonl` for audit.
 
@@ -128,6 +128,11 @@ Copy `backend/.env.example` to `backend/.env` and fill **only `.env`**:
 | **Models (compulsory, no hardcoded defaults)** | `LLM_MODEL_MARKET_RESEARCH` | `anthropic/claude-3.5-sonnet` | `research.get_model_id("research")` |
 | | `LLM_MODEL_STRATEGY` | `openai/gpt-4o` | `strategy.get_model_id("strategy")` |
 | | `LLM_MODEL_REPORTING` | `openai/gpt-4o-mini` | `reporting.get_model_id("reporting")` |
+| **MCP Server** | `MCP_SERVER_URL` | *(empty — fallback)* | `mcp/client.is_mcp_configured()` — SSE URL e.g. `http://localhost:3000/sse`; wires `mcp_get_*` tools into research agent |
+| | `ALPACA_MCP_SERVER_URL` | alias | same as `MCP_SERVER_URL` |
+| | `MCP_SERVER_COMMAND` | *(empty)* | stdio command e.g. `npx -y @alpacahq/alpaca-mcp-server`; alternative to URL |
+| | `ALPACA_MCP_COMMAND` | alias | same as `MCP_SERVER_COMMAND` |
+| **Alpaca CLI** | *(no env, auto-detected)* | `alpaca` binary | `tools/alpaca_cli_tool._run_alpaca_cli` runs `alpaca account --json` etc. with 8s timeout + broker fallback |
 | **Risk (deterministic)** | `RISK_MAX_POSITION_PCT` | `0.15` | `risk.check_position_limit` → `notional/equity <=15%` else `approved_scaled` |
 | | `RISK_MAX_EXPOSURE_PCT` | `0.60` | `check_exposure` → `gross/equity <=60%` |
 | | `RISK_DAILY_DRAWDOWN_PCT` | `0.03` | `check_drawdown` → `(equity-peak)/peak < -3%` → writes `logs/.paused` |
@@ -202,5 +207,8 @@ venv/Scripts/python.exe -c "from backend.agents.reporting import reporting_agent
 | `paused: true, risk rejected` | `logs/.paused` exists → `/resume` or `rm backend/logs/.paused` |
 | `429 Rate limit exceeded` | `25/min` bucket — wait `retry_after` seconds or set `REDIS_URL` for multi-worker |
 | `__pycache__` showing in `git status` | Already fixed in `.gitignore:48` `**/__pycache__/` — run `git status` again |
+| `No data available for this symbol/timeframe` (research→strategy hold) | Expected no-mock behavior — unknown/weekend symbol returns empty `fetch_ohlcv` → `strategy` HOLD 0 → `risk: no_trade`. Use real symbol e.g. `SPY` during market hours or check `logs/broker.jsonl` for `market_data_no_data` |
+| `source: alpaca_cli_fallback` + `alpaca CLI binary not found` | Normal when `alpaca` CLI not installed — fallback to broker works. Install via `pip install alpaca-trade-api` and verify `alpaca --version` to get `source: alpaca_cli` |
+| `source: mcp_fallback` + `mcp_not_configured` | Normal when `MCP_SERVER_URL` empty — fallback to broker works. Set `MCP_SERVER_URL=http://localhost:3000/sse` and run `npx @alpacahq/alpaca-mcp-server` for `source: mcp` |
 
 *All flags are single source via `backend/.env.example` → `backend/core/config.py` (`get_settings()`) → `backend/core/utils.get_model_id()` / `backend/core/system_prompt.get_system_prompt()`.*

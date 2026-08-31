@@ -55,13 +55,27 @@
 
 ### 2.5 Integration — Graph and CLI Wiring
 
-- **Files:** `backend/graph/state.py`, `backend/graph/build.py`, `backend/cli/commands.py`, `backend/cli/repl.py`, `backend/cli/__main__.py`, `backend/data/market.py`, `backend/data/news.py`
+- **Files:** `backend/graph/state.py`, `backend/graph/build.py`, `backend/cli/commands.py`, `backend/cli/repl.py`, `backend/cli/__main__.py`, `backend/data/market.py`, `backend/data/news.py`, `backend/tools/alpaca_cli_tool.py`, `backend/tools/mcp_tools.py`, `backend/mcp/client.py`, `backend/agents/research.py`
 - **Cases:**
-  - Graph wiring of the five agents with the conditional risk branch: approved goes to execution, rejected or scaled stops or is handled without invoking execution.
+  - Graph wiring of the five agents with the conditional risk branch: approved goes to execution, rejected or scaled stops or is handled without invoking execution. Research agent now wires 9 tools (3 news + 3 CLI + 3 MCP) — verify `len(_RESEARCH_TOOLS)==9` and `get_research_agent()` returns `CompiledStateGraph`.
   - CLI to graph instruction routing including natural-language bias such as “be more conservative” and slash commands `status`, `positions`, `report`, `pause`, and `resume`.
   - Broker to execution connectivity and data to research and strategy feature flow including multi-timeframe VWAP and indicators.
   - Live streaming order of research to strategy to risk to execution.
-- **Harness:** Mocked broker and in-memory bucket with a shared state fixture.
+  - MCP/CLI bonus path: verify `alpaca_cli_account` and `mcp_get_account` both return `source: "alpaca_cli_fallback"` / `"mcp_fallback"` when `alpaca` binary and `MCP_SERVER_URL` absent, and `source: "alpaca_cli"` / `"mcp"` when configured; no mock data — stub `is_mcp_configured()==False` yields fallback, not fabricated account.
+- **Harness:** Mocked broker and in-memory bucket with a shared state fixture. `alpaca_cli_tool._run_alpaca_cli` mocked via `subprocess.run` patch; `mcp.client.is_mcp_configured` patched via env var injection.
+
+### 2.6 No-Mock + CLI/MCP Fallback (Phase 12 Additions)
+
+- **Files:** `backend/data/market.py:fetch_ohlcv` / `fetch_option_chain`, `backend/data/news.py:fetch_news` / `get_macro_calendar`, `backend/agents/strategy.py:ensure_options_in_decision`, `backend/tools/alpaca_cli_tool.py`, `backend/tools/mcp_tools.py`
+- **Cases:**
+  - `fetch_ohlcv("UNKNOWN_FAKE")` returns empty `DataFrame` with `log_event("market_data_no_data", "No data available for this symbol/timeframe")` (not 5 mock AAPL bars).
+  - `fetch_ohlcv("AAPL")` on weekend/closed returns empty with `market_data_no_data` (not mock).
+  - `fetch_option_chain("SPY")` without OPRA returns `[]` with `option_chain_no_data` log.
+  - `fetch_news` without creds returns `[]` with `news_no_data` log; `get_macro_calendar` returns `[]` with `macro_calendar_no_data`.
+  - `strategy.ensure_options_in_decision` on empty chain returns `{"error": "No data available for this underlying..."}` not `{"legs": [{"symbol": "Mock Call"}]}`.
+  - `alpaca_cli_account.invoke({})` without binary falls back to broker and returns `source: "alpaca_cli_fallback"` with live account or `No data available...` error, never synthetic `cash: 100000` from mock.
+  - `mcp_get_account.invoke({})` without `MCP_SERVER_URL` returns `source: "mcp_fallback"` with `mcp_reason: "mcp_not_configured"`.
+  - End-to-end: `build_graph().invoke({"messages": [{"role":"user","content":"BTC/USD analysis"}]})` with weekend `AAPL` yields `strategy: {action:"hold", qty:0}` → `risk: no_trade` with `No data available...` in logs (verified 2026-08-31).
 
 ---
 
@@ -111,9 +125,10 @@
 
 ## 6. What Is Not Tested in v1
 
-- Live Alpaca network calls — always mocked. The only live run is the dry-run against the dedicated submission paper account before Monday August thirty first.
+- Live Alpaca network calls — always mocked. The only live run is the dry-run against the dedicated submission paper account before Monday August thirty first. Phase 12 fallback paths are tested via mocked `subprocess.run` and env var injection, not live `alpaca` CLI or live MCP server.
 - Postgres with TimescaleDB and the after-the-fact HTML renderer — both are v2 and are deferred.
 - The legacy `backend/app` alias beyond its smoke test as a deprecated path.
+- Real MCP server connection (`langchain_mcp_adapters` → SSE/stdio) — requires `MCP_SERVER_URL` and `npx @alpacahq/alpaca-mcp-server` running; sync unit tests cover fallback, async integration is manual dry-run only.
 
 ---
 

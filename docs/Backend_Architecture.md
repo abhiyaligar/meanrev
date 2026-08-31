@@ -3,7 +3,7 @@
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Principle:** No UI, autonomous agent workflow only. Risk v1 is deterministic rule-based. ML surrogate risk is deferred to v2.  
-**Last Updated:** Phase 11 + Single Command `meanrev` — CLI `meanrev` like `claude`/`codex` via `pyproject.toml` + `meanrev.bat`/`meanrev` wrappers + `How_To_use.md`; prior: Phase 9 Strategy ATR sizing, token counter, HITL, Phase 8 Reporting, Phase 6 Risk, Tools + System_Prompt + utils
+**Last Updated:** Phase 12 — MCP Server + Alpaca CLI wired into research agent (TOOLS 12→21, `backend/mcp/` + `alpaca_cli_tool.py`/`mcp_tools.py`), no-mock data (`No data available...`); prior: Phase 11 `meanrev` single command, Phase 9 Strategy ATR sizing + token counter + HITL
 
 ---
 
@@ -60,6 +60,9 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 | Evaluation | DeepEval with pytest and Promptfoo (Node CLI, separate) | Prompt regression and agent output quality checks, not imported into the application runtime |
 | DRY Utils | `backend/core/utils.py` | Single source for `get_model_id` (was 4×), `handle_tool_errors` (was 3×), `normalize_symbol`, `clamp_limit` — net -71 lines |
 | System Prompts | `backend/core/system_prompt.py` + `backend/System_Prompt.py` | Central registry for `RESEARCH/STRATEGY/REPORTING/RISK/EXECUTION/CLI` prompts, fetched via `get_system_prompt(agent)` |
+| Alpaca CLI | `backend/tools/alpaca_cli_tool.py` | `alpaca` CLI subprocess wrappers (`account/positions/orders/clock --json`) with broker fallback, 8s timeout; wired into research agent for Phase 12 bonus |
+| MCP Server | `backend/mcp/client.py` + `backend/tools/mcp_tools.py` | MCP bridge (`langchain_mcp_adapters` when `MCP_SERVER_URL` set) + 4 LangChain tools with broker fallback; config in `backend/mcp/server_config.example.json` |
+| No-Mock Policy | `backend/data/market.py` + `backend/data/news.py` | Every empty fetch returns `[]` or `pd.DataFrame()` with `No data available for this ...` + `log_event` (`market_data_no_data`, `news_no_data`), never fabricated bars/headlines — `strategy` returns `risk: no_trade` on empty |
 
 **Explicitly excluded in v1:** FastAPI backend service and React plus Tailwind frontend. These were removed after confirmation that a UI is not required and incurs unnecessary scope. The ML surrogate risk model using XGBoost or LSTM over Monte Carlo paths is also excluded from v1 for timeline reasons.
 
@@ -70,14 +73,15 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 The project is structured around the agent graph, not generic feature folders.
 
 - **cli:** Houses the REPL entrypoint, the prompt loop and command routing, and the handlers for slash commands such as status, positions, report, pause, and resume.
-- **agents:** Contains one module per specialized agent: research, strategy, risk, execution, and reporting. Each module encapsulates its prompt (fetched from `core/system_prompt.py`), input contract, and output contract; `research`/`strategy`/`reporting` are built-in `create_agent` with `HumanInTheLoopMiddleware` for `submit_order`.
+- **agents:** Contains one module per specialized agent: research, strategy, risk, execution, and reporting. Each module encapsulates its prompt (fetched from `core/system_prompt.py`), input contract, and output contract; `research`/`strategy`/`reporting` are built-in `create_agent` with `HumanInTheLoopMiddleware` for `submit_order`. `research` now imports 9 tools (3 news + 3 `alpaca_cli` + 3 `mcp`) for Phase 12 bonus; `research_agent` vs `get_research_agent()` factory covers sync+async MCP loading.
 - **graph:** Holds the shared LangGraph state schema (`GraphState` with 7 fields: `messages`, `market_snapshot`, `research`, `strategy`, `risk`, `execution`, `reporting_context`) and the wiring (`research→strategy→risk→execution` with `approved_scaled` handling and `InMemorySaver` checkpointer for HITL).
 - **broker:** Encapsulates the Alpaca client wrapper (`get_account`, `get_positions`, `get_orders`, `get_clock`, `submit_order` for `market/limit/stop/options`) and the Redis-backed rate limiting (`25/min` Lua + `tenacity` retry + `30s` timeout).
-- **data:** Separates market data handling (`fetch_ohlcv` + `VWAP` + `RSI/MACD/EMA/BB/ATR` via `pandas_ta`, `fetch_option_chain` with Greeks via `scipy` else `math`, `align_timeframes`, `cache` TTL) from news and sentiment fetching (`fetch_news`, `get_macro_calendar`, `extract_keywords`).
-- **tools:** LangChain `@tool` wrappers (`broker_tools`, `market_tools`, `news_tools`) — 12 tools total, all respect `25/min` + `30s` timeout, `submit_order` is HITL-protected.
-- **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
+- **data:** Separates market data handling (`fetch_ohlcv` + `VWAP` + `RSI/MACD/EMA/BB/ATR` via `pandas_ta`, `fetch_option_chain` with Greeks via `scipy` else `math`, `align_timeframes`, `cache` TTL, **no-mock**: empty `AAPL` weekend or unknown symbol returns `pd.DataFrame()` + `log_event("market_data_no_data", "No data available for this symbol/timeframe")`) from news and sentiment fetching (`fetch_news`, `get_macro_calendar`, `extract_keywords`, also no-mock with `news_no_data`/`macro_calendar_no_data`).
+- **tools:** LangChain `@tool` wrappers — 21 tools total: `broker_tools` (5), `market_tools` (5 + `detect_arbitrage`), `news_tools` (3), `alpaca_cli_tool` (4: `alpaca_cli_account/positions/orders/clock` via subprocess + broker fallback), `mcp_tools` (4: `mcp_get_account/positions/orders/clock` via MCP bridge + broker fallback). All respect `25/min` + `30s` timeout (CLI 8s), `submit_order` is HITL-protected. Grouped as `TOOLS`, `BROKER_TOOLS`, `ALPACA_CLI_TOOLS`, `MCP_TOOLS`, `MARKET_TOOLS`, `NEWS_TOOLS`.
+- **mcp:** MCP bridge for Phase 12 bonus — `mcp/client.py` (`is_mcp_configured`, `get_mcp_tools`, `aget_mcp_tools`, `mcp_server_info`) + `mcp/server_config.example.json` + `tools/mcp_tools.py` wrapping Alpaca MCP Server when `MCP_SERVER_URL`/`MCP_SERVER_COMMAND` set, else broker fallback.
+- **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`, `MCP_SERVER_URL/COMMAND`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
 - **logs:** Gitignored directory for JSON-line output (`broker.jsonl`, `.paused` flag for circuit breaker) that serves as the authoritative audit trail.
-- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`), ignore rules, Python project manifest (`pyproject.toml` with `meanrev` entry), and single-command wrappers (`meanrev`, `meanrev.bat`).
+- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`, `MCP_SERVER_URL/COMMAND`), ignore rules, Python project manifest (`pyproject.toml` with `meanrev` entry), and single-command wrappers (`meanrev`, `meanrev.bat`).
 
 This layout ensures that a change to risk logic, execution throttling, or strategy prompting is isolated to a single directory with a clear ownership boundary.
 
@@ -150,7 +154,7 @@ The data layer is responsible for ensuring these inputs are fresh, aligned, and 
 
 ## 9. Persistence and Caching Strategy
 
-- **Primary audit trail in v1:** Structured JSON-line logs on the filesystem. These logs are the source of truth for debugging, for the reporting agent, and for demonstrating agent reasoning to judges.
+- **Primary audit trail in v1:** Structured JSON-line logs on the filesystem (`logs/broker.jsonl` + `.paused` flag). These logs are the source of truth for debugging, for the reporting agent, and for demonstrating agent reasoning to judges. Every `alpaca_cli_*` / `mcp_*` call logs `source: "alpaca_cli"` vs `"alpaca_cli_fallback"` / `"mcp"` vs `"mcp_fallback"` plus `cli_error`/`mcp_reason` for bonus verification; empty data logs `market_data_no_data` with `No data available...`.
 - **Optional relational persistence:** PostgreSQL with TimescaleDB is reserved for v2 or for cases where flat-file history becomes insufficient for querying historical bars or long agent histories.
 - **Caching and coordination:** Redis is used for the execution rate limiter token bucket and optionally for publish and subscribe messaging between agent stages. Its usage is limited to operational concerns, not as a primary data store in v1.
 - **No dashboard database:** Since no web frontend exists, there is no backing store for UI state.
