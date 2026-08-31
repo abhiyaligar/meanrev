@@ -228,12 +228,13 @@ def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             exec_status = "submitted_awaiting_fill"
 
+        filled_price = result.get("filled_avg_price") or result.get("filled_price") or result.get("limit_price") or result.get("stop_price")
         state["execution"] = {
             "status": exec_status,
             "order": order_payload,
             "order_id": order_id,
             "filled_qty": filled_qty,
-            "filled_price": result.get("filled_avg_price") or result.get("filled_price") or result.get("limit_price"),
+            "filled_price": filled_price,
             "latency_ms": round(latency_ms, 2),
             "broker_result": str(result)[:800],
             "human_approved": should_hitl,  # True if hitl mode and approved, False if auto
@@ -250,10 +251,21 @@ def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             status=exec_status,
             **({"filled_qty": filled_qty} if filled_qty else {}),
         )
+        # Concise trade log for jsonl — required fields: ts (auto), event=buy/sell, level, order_id, price
+        trade_price = filled_price if filled_price is not None else (order_payload.get("limit_price") or order_payload.get("stop_price"))
+        log_event(
+            order_payload["side"],  # event = "buy" or "sell"
+            level="info",
+            order_id=str(order_id),
+            price=float(trade_price) if trade_price is not None else None,
+            symbol=order_payload["symbol"],
+            qty=float(order_payload["qty"]),
+            status=exec_status,
+        )
         if exec_status == "partial_fill":
-            log_event("execution_partial_fill", order_id=order_id, filled_qty=filled_qty, symbol=order_payload["symbol"])
+            log_event("execution_partial_fill", order_id=str(order_id), filled_qty=filled_qty, symbol=order_payload["symbol"])
         elif exec_status == "rejected":
-            log_event("execution_rejected", order_id=order_id, reason=result.get("status") or result.get("error"))
+            log_event("execution_rejected", order_id=str(order_id), reason=result.get("status") or result.get("error"))
 
     except Exception as e:
         latency_ms = (time.monotonic() - start) * 1000
@@ -270,6 +282,21 @@ def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             "stub": False,
         }
         log_event("execution_submit_failed" if status == "submit_failed" else f"execution_{status}", level="warning", error=err_msg[:200], latency_ms=round(latency_ms, 2))
+        # Also emit concise buy/sell failure log with required fields (order_id unknown here, use pending)
+        try:
+            fail_price = order_payload.get("limit_price") or order_payload.get("stop_price")
+            log_event(
+                order_payload.get("side", "buy"),
+                level="warning",
+                order_id="pending",
+                price=float(fail_price) if fail_price is not None else None,
+                symbol=order_payload.get("symbol"),
+                qty=float(order_payload.get("qty", 0)),
+                status=status,
+                error=err_msg[:200],
+            )
+        except Exception:
+            pass
         # Tenacity already retried; no further retry here
 
     return state
