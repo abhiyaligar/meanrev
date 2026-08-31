@@ -313,6 +313,100 @@ def submit_order(
     return _call_with_retry(_do)
 
 
+def cancel_order(order_id: str) -> Dict[str, Any]:
+    """
+    Cancel a single open order by its UUID/str id — throttled 25/min, 30s timeout.
+    Returns {"cancelled": True, "order_id": str} or raises on not-found.
+    """
+    oid = str(order_id).strip()
+    if not oid:
+        raise ValueError("order_id required for cancel_order")
+
+    def _do():
+        client = _create_trading_client()
+        # cancel_order_by_id returns None on success in alpaca-py
+        client.cancel_order_by_id(oid)
+        return {"cancelled": True, "order_id": oid}
+
+    return _call_with_retry(_do)
+
+
+def cancel_all_orders() -> List[Dict[str, Any]]:
+    """
+    Cancel all open orders — throttled 25/min.
+    Returns list of CancelOrderResponse dicts (id + status code).
+    """
+    def _do():
+        client = _create_trading_client()
+        results = client.cancel_orders()
+        # results may be list of CancelOrderResponse or dict; normalize via _dump_list
+        if isinstance(results, list):
+            return [_dump(r) if not isinstance(r, dict) else r for r in results]
+        if isinstance(results, dict):
+            return [results]
+        return _dump_list(list(results)) if results else []
+
+    return _call_with_retry(_do)  # type: ignore
+
+
+def replace_order(
+    order_id: str,
+    qty: Optional[float] = None,
+    limit_price: Optional[float] = None,
+    stop_price: Optional[float] = None,
+    trail: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Modify (replace) an existing open order — throttled 25/min, 30s timeout.
+    Only qty, limit_price, stop_price, trail are mutable per Alpaca ReplaceOrderRequest.
+    Returns dumped updated Order. If no field provided, raises ValueError.
+    """
+    oid = str(order_id).strip()
+    if not oid:
+        raise ValueError("order_id required for replace_order")
+    # At least one field must be set
+    if qty is None and limit_price is None and stop_price is None and trail is None:
+        raise ValueError("At least one of qty, limit_price, stop_price, trail required for replace")
+
+    def _do():
+        client = _create_trading_client()
+        from alpaca.trading.requests import ReplaceOrderRequest
+
+        # Build request with only provided fields (NonEmptyRequest drops None)
+        req_kwargs: Dict[str, Any] = {}
+        if qty is not None:
+            try:
+                q = float(qty)
+            except (TypeError, ValueError):
+                raise ValueError(f"qty {qty!r} must be numeric >0")
+            if q <= 0:
+                raise ValueError("qty must be >0")
+            # Replace qty is int in SDK; for crypto fractional, SDK may still require int — we pass int if not crypto context
+            # Since we don't have symbol here, pass rounded int if q is whole, else float (API will validate)
+            req_kwargs["qty"] = int(q) if float(q).is_integer() else q
+        if limit_price is not None:
+            lp = float(limit_price)
+            if lp <= 0:
+                raise ValueError("limit_price must be >0")
+            req_kwargs["limit_price"] = lp
+        if stop_price is not None:
+            sp = float(stop_price)
+            if sp <= 0:
+                raise ValueError("stop_price must be >0")
+            req_kwargs["stop_price"] = sp
+        if trail is not None:
+            tr = float(trail)
+            if tr <= 0:
+                raise ValueError("trail must be >0")
+            req_kwargs["trail"] = tr
+
+        req = ReplaceOrderRequest(**req_kwargs)
+        order = client.replace_order_by_id(oid, req)
+        return _dump(order)
+
+    return _call_with_retry(_do)  # type: ignore
+
+
 def _is_crypto_symbol(sym: str) -> bool:
     """Detect crypto for qty/time_in_force handling (BTC/USD, BTC, ETH/USD etc.)."""
     if not sym:

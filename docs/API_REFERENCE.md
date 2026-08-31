@@ -6,7 +6,7 @@
 **Auth:** None on HTTP — server uses `ALPACA_API_KEY` / `ALPACA_API_SECRET` from environment (gitignored, never logged). Paper trading enforced (`paper=True`).  
 **Rate Limit:** 25 req/min leaky bucket (Redis-backed Lua + `InMemory` fallback) shared across all `/api/v1` calls + `tenacity` exponential backoff + jitter on 429/5xx/timeout (30s hard timeout).  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
-**Last Updated:** Phase 12 — MCP Server + Alpaca CLI (TOOLS 12→21, `alpaca_cli_*` + `mcp_*` in research agent), no-mock `No data available...` + `BTC/ETH` derived; prior: Phase 9 Strategy token counter + options + ATR sizing, Risk `RISK_MAX_*` + breaker, Execution `auto` vs `hitl`
+**Last Updated:** Phase 12b — Order management (TOOLS 21→25: `set_stop_loss`, `modify_order`, `cancel_order`, `cancel_all_orders` live via `broker/client` throttled), prior: Phase 12 MCP/CLI 21 + no-mock
 
 ---
 
@@ -212,13 +212,13 @@ backend/
   broker/
     client.py       # throttled wrapper: get_account(), get_positions(), get_orders(), get_clock(), submit_order() market/limit/stop/options+crypto
     rate_limit.py   # TokenBucket, with_rate_limit(), backoff_delay(), is_retryable_exception() 25/min
-  tools/            # LangChain @tool wrappers — 21 total (Phase 12 TOOLS 12→21)
-    broker_tools.py      # get_account, get_positions, get_orders, get_clock, submit_order (5, HITL-protected)
+  tools/            # LangChain @tool wrappers — 25 total (Phase 12b 21→25)
+    broker_tools.py      # get_account, get_positions, get_orders, get_clock, submit_order, set_stop_loss, modify_order, cancel_order, cancel_all_orders (9, 5 HITL-protected)
     market_tools.py      # get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage (5)
     news_tools.py        # fetch_news, get_macro_calendar, extract_keywords (3)
     alpaca_cli_tool.py   # Phase 12: alpaca_cli_account/positions/orders/clock via subprocess "alpaca --json" + broker fallback (4)
     mcp_tools.py         # Phase 12: mcp_get_account/positions/orders/clock via MCP bridge + broker fallback (4)
-    __init__.py          # TOOLS (21), BROKER_TOOLS, ALPACA_CLI_TOOLS, MCP_TOOLS, MARKET_TOOLS, NEWS_TOOLS
+    __init__.py          # TOOLS (25), BROKER_TOOLS, BROKER_WRITE_TOOLS (5), ALPACA_CLI_TOOLS, MCP_TOOLS, MARKET_TOOLS, NEWS_TOOLS
   mcp/              # Phase 12 MCP bridge
     client.py       # is_mcp_configured, get_mcp_tools, aget_mcp_tools (langchain_mcp_adapters), mcp_server_info
     server_config.example.json  # {mcpServers: {alpaca: {command: "npx @alpacahq/alpaca-mcp-server"}}}
@@ -255,7 +255,8 @@ Beyond HTTP, agents use 21 LangChain `@tool` wrappers (all throttled/fallback, n
 | Group | Tools | Source file | Notes |
 | :--- | :--- | :--- | :--- |
 | Broker | `get_account`, `get_positions`, `get_orders`, `get_clock` | `broker_tools.py` | Read via `broker/client.py` 25/min |
-| Write | `submit_order` | `broker_tools.py` | `market/limit` + extensions `stop/options/crypto` (HITL `HumanInTheLoopMiddleware`) |
+| Write | `submit_order` | `broker_tools.py` | `market/limit` + extensions `stop/options/crypto` (HITL) — dry_run stub, execution_agent does live throttled |
+| **Stop/Manage** | `set_stop_loss`, `modify_order`, `cancel_order`, `cancel_all_orders` | `broker_tools.py` → `broker/client.py:submit_order/cancel_order_by_id/replace_order_by_id/cancel_orders` | Live throttled; `set_stop_loss` auto-qty via position (slash-insensitive), blocks crypto stop with hint; `modify_order` qty/limit/stop/trail; `cancel_*` by UUID |
 | Market | `get_ohlcv`, `get_market_snapshot`, `get_option_chain`, `align_timeframes_tool`, `detect_arbitrage` | `market_tools.py` | `fetch_ohlcv` + indicators + Greeks; `detect_arbitrage(pairs, threshold_pct)` dynamic |
 | News | `fetch_news`, `get_macro_calendar`, `extract_keywords` | `news_tools.py` | `No data available...` on empty (no mock) |
 | **Alpaca CLI** | `alpaca_cli_account`, `alpaca_cli_positions`, `alpaca_cli_orders`, `alpaca_cli_clock` | `alpaca_cli_tool.py` | `subprocess alpaca --json` 8s + broker fallback; Phase 12 bonus |
