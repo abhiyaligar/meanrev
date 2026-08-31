@@ -463,37 +463,12 @@ def fetch_ohlcv(
                 except Exception:
                     pass
 
-        # Final fallback for any remaining empty (stocks on weekend, free-tier gaps)
+        # No mock fallback — if still empty, return empty and let caller show "No data available"
         if df.empty:
-            mock_price_map = {"AAPL": 175.0, "SPY": 505.0, "QQQ": 430.0, "TSLA": 250.0, "NVDA": 480.0, "MSFT": 380.0}
-            # For crypto without USD, use BTC/ETH prices as before
-            if is_crypto:
-                mock_close = 50000.0 if "BTC" in sym else 3000.0 if "ETH" in sym else 150.0
-            else:
-                mock_close = mock_price_map.get(sym, 150.0)
-            import numpy as np
-
-            idx = pd.date_range(end=datetime.now(timezone.utc).replace(tzinfo=None), periods=5, freq="D")
-            mock_df = pd.DataFrame(
-                {
-                    "open": [mock_close * (0.99 + 0.01 * i) for i in range(5)],
-                    "high": [mock_close * (1.01 + 0.01 * i) for i in range(5)],
-                    "low": [mock_close * (0.98 + 0.01 * i) for i in range(5)],
-                    "close": [mock_close * (1 + 0.005 * (i - 2)) for i in range(5)],
-                    "volume": [1_000_000 + 100_000 * i for i in range(5)],
-                },
-                index=idx,
-            )
-            mock_df.index = pd.to_datetime(mock_df.index).tz_localize("UTC")
-            mock_df = _compute_vwap(mock_df)
-            mock_df = _add_indicators(mock_df)
-            try:
-                mock_df = mock_df.sort_index()
-            except Exception:
-                pass
-            _set_cached(key, mock_df)
-            log_event("market_data_mock_fallback", symbol=sym, timeframe=timeframe, rows=len(mock_df), reason="alpaca returned 0 rows (weekend/free-tier), using mock")
-            return mock_df.tail(lim).copy() if len(mock_df) > lim else mock_df
+            log_event("market_data_no_data", symbol=sym, timeframe=timeframe, reason="No data available for this symbol/timeframe (Alpaca returned 0 rows, weekend or free-tier gap)")
+            # Do not cache empty with mock; cache empty for short TTL to avoid hammering
+            _set_cached(key, df)
+            return df
 
         _set_cached(key, df)
         log_event("market_data_fetch_ok", symbol=sym, timeframe=timeframe, rows=len(df))
@@ -657,56 +632,10 @@ def fetch_option_chain(
         if "OPRA" not in str(e):
             log_event("option_chain_alpaca_error", level="warning", underlying=sym, error=str(e)[:200])
 
-    # Deterministic mock chain — spot proxied via last close or 150 fallback
-    spot = 150.0
-    try:
-        df = fetch_ohlcv(sym, timeframe="1Day", limit=1)
-        if not df.empty and "close" in df.columns and not pd.isna(df["close"].iloc[-1]):
-            spot = float(df["close"].iloc[-1])
-    except Exception:
-        pass
-
-    # Generate strikes around spot, 30 days expiry if not provided
-    if expiration is None:
-        exp_date = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
-    else:
-        exp_date = expiration
-    try:
-        exp_dt = datetime.fromisoformat(exp_date).replace(tzinfo=timezone.utc)
-        tte = max(1 / 365, (exp_dt - datetime.now(timezone.utc)).total_seconds() / (365 * 24 * 3600))
-    except Exception:
-        tte = 30 / 365
-        exp_date = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
-
-    strikes = [round(spot * (0.9 + 0.05 * i), 2) for i in range(5)]  # 90%..110%
-    chain: List[Dict[str, object]] = []
-    for strike in strikes[: lim // 2 + 1]:
-        for opt_type in ("call", "put"):
-            # Mock last price via intrinsic + time value
-            intrinsic = max(0, spot - strike) if opt_type == "call" else max(0, strike - spot)
-            time_val = spot * 0.02 * math.sqrt(tte)
-            last_price = round(intrinsic + time_val, 2)
-            greeks = _black_scholes_greeks(spot, strike, tte, volatility=0.3, option_type=opt_type)
-            chain.append(
-                {
-                    "symbol": f"{sym}{exp_date.replace('-','')}{opt_type[0].upper()}{strike}",
-                    "underlying": sym,
-                    "strike": strike,
-                    "expiration": exp_date,
-                    "type": opt_type,
-                    "last_price": last_price,
-                    "spot": spot,
-                    "greeks": greeks,
-                    "source": "mock-indicative",
-                }
-            )
-            if len(chain) >= lim:
-                break
-        if len(chain) >= lim:
-            break
-
-    log_event("option_chain_mock", underlying=sym, expiration=exp_date, count=len(chain), spot=spot)
-    return chain[:lim]
+    # No mock fallback — OPRA requires subscription, free-tier has no options data
+    # If Alpaca options client not available or not subscribed, return empty with log
+    log_event("option_chain_no_data", underlying=sym, reason="No data available for this underlying/expiration (OPRA subscription required, free-tier has no options chain)")
+    return []
 
 
 def align_timeframes(frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:

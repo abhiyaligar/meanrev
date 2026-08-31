@@ -170,29 +170,12 @@ def fetch_news(
         if tried_alpaca:
             log_event("news_fetch_alpaca_error", level="warning", error=str(e)[:200], symbols=sym_key)
 
-    # Fallback mock — deterministic so tests and offline dev work
+    # No mock fallback — if Alpaca returns no data, return empty and let caller handle "No data available"
     if not headlines:
-        mock_base = [
-            "Market holds steady ahead of Fed speech",
-            "NFP preview: labor market resilience eyed",
-            "CPI release could sway rate path expectations",
-            "Earnings season lifts sentiment for large caps",
-            "Options flow mixed into expiry week",
-        ]
-        for i in range(lim):
-            h = mock_base[i % len(mock_base)]
-            if symbols:
-                h = f"{symbols[0].upper()}: {h}"
-            headlines.append(
-                {
-                    "headline": h,
-                    "symbol": sym_key,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "source": "mock",
-                    "sentiment_score": str(_sentiment_score(h)),
-                }
-            )
-        log_event("news_fetch_mock", symbols=sym_key, count=len(headlines))
+        log_event("news_no_data", symbols=sym_key, reason="No data available for this symbols/timeframe (Alpaca returned 0 headlines)")
+        # Return empty list — tools and research will output "No data available for this"
+        _NEWS_CACHE[cache_key] = (time.time(), [])
+        return []
 
     # Enrich with string sentiment label
     for h in headlines:
@@ -214,56 +197,18 @@ def fetch_news(
 def get_macro_calendar(days_ahead: int = 7) -> List[Dict[str, str]]:
     """
     Return upcoming macro catalysts: Fed speeches, NFP, CPI, earnings, benchmark revisions.
-    For v1, returns a deterministic mock calendar (no external calendar API required)
-    so Research agent has catalyst data even offline. Cache 5 min.
-
-    Each entry: {event, date, importance, description}
+    No mock fallback — if no external calendar API is configured, returns empty with log.
+    Caller should handle empty as "No data available for this".
     """
     global _MACRO_CACHE
     if _MACRO_CACHE and time.time() - _MACRO_CACHE[0] < CACHE_TTL:
         return _MACRO_CACHE[1]
 
-    now = datetime.now(timezone.utc)
-    # Mock calendar — dates are relative to now for demo stability
-    calendar = [
-        {
-            "event": "Fed Speech",
-            "date": (now + timedelta(days=1)).date().isoformat(),
-            "importance": "high",
-            "description": "Scheduled Fed commentary — rate path watch",
-        },
-        {
-            "event": "NFP",
-            "date": (now + timedelta(days=3)).date().isoformat(),
-            "importance": "high",
-            "description": "Non-Farm Payrolls — labor market health",
-        },
-        {
-            "event": "CPI",
-            "date": (now + timedelta(days=5)).date().isoformat(),
-            "importance": "high",
-            "description": "Consumer Price Index — inflation gauge",
-        },
-        {
-            "event": "Earnings",
-            "date": (now + timedelta(days=2)).date().isoformat(),
-            "importance": "medium",
-            "description": "Large-cap earnings batch",
-        },
-        {
-            "event": "Benchmark Revision",
-            "date": (now + timedelta(days=6)).date().isoformat(),
-            "importance": "medium",
-            "description": "Index rebalancing and benchmark revision",
-        },
-    ]
-    # Filter to days_ahead
-    cutoff = now.date() + timedelta(days=days_ahead)
-    filtered = [e for e in calendar if e["date"] <= cutoff.isoformat()]
-
-    _MACRO_CACHE = (time.time(), filtered)
-    log_event("macro_calendar_mock", count=len(filtered), days_ahead=days_ahead)
-    return filtered
+    # No external calendar API configured for real data — return empty with message
+    # (Previous mock calendar removed per user request: no mock data)
+    log_event("macro_calendar_no_data", reason="No data available for macro calendar (no external API configured)")
+    _MACRO_CACHE = (time.time(), [])
+    return []
 
 
 def extract_keywords(headlines: List[Dict[str, str]], top_k: int = 10) -> List[str]:

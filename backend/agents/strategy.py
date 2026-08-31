@@ -131,8 +131,8 @@ def ensure_options_in_decision(decision: Dict[str, Any], underlying: Optional[st
             decision["option_greeks"] = leg.get("greeks")
             log_event("strategy_options_injected", underlying=sym, leg=leg.get("symbol"))
         else:
-            decision["option_leg"] = {"symbol": f"{sym} Mock Call", "note": "mock option leg injected for hackathon compliance"}
-            log_event("strategy_options_mock_injected", underlying=sym)
+            decision["option_leg"] = {"error": "No data available for this underlying/expiration (OPRA subscription required, free-tier has no options chain)"}
+            log_event("strategy_options_no_data", underlying=sym, reason="No data available for this")
     except Exception as e:
         log_event("strategy_options_inject_failed", level="warning", error=str(e)[:200])
         decision["option_leg"] = {"error": str(e)[:100]}
