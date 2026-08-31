@@ -88,27 +88,32 @@ backend/
   data/
     market.py           # OHLCV + indicators (pandas-ta) no-mock (empty → No data available...), VWAP 1m/5m/1h/1d, fetch_option_chain Greeks, BTC/ETH derived
     news.py             # sentiment/news fetching no-mock (empty → No data available...)
-  tools/                # LangChain @tool — 21 total (Phase 12)
-    broker_tools.py     # get_account, get_positions, get_orders, get_clock, submit_order (5, HITL)
+  tools/                # LangChain @tool — 25 total (12b: 21→25 with order management)
+    broker_tools.py     # get_account, get_positions, get_orders, get_clock, submit_order, set_stop_loss, modify_order, cancel_order, cancel_all_orders (9, 5 HITL)
     market_tools.py     # get_ohlcv, get_market_snapshot, get_option_chain, align_timeframes_tool, detect_arbitrage (5)
     news_tools.py       # fetch_news, get_macro_calendar, extract_keywords (3)
     alpaca_cli_tool.py  # Phase 12: alpaca_cli_account/positions/orders/clock via subprocess "alpaca --json" + broker fallback (4)
     mcp_tools.py        # Phase 12: mcp_get_account/positions/orders/clock via MCP bridge + broker fallback (4)
-    __init__.py         # TOOLS (21), BROKER_TOOLS, ALPACA_CLI_TOOLS, MCP_TOOLS exports
+    __init__.py         # TOOLS (25), BROKER_TOOLS, BROKER_WRITE_TOOLS (5), ALPACA_CLI_TOOLS, MCP_TOOLS exports
   mcp/                  # Phase 12 MCP bridge
     client.py           # is_mcp_configured, get_mcp_tools, aget_mcp_tools, mcp_server_info
     server_config.example.json  # {mcpServers: {alpaca: {command: "npx @alpacahq/alpaca-mcp-server"}}}
     __init__.py
+  scheduler/            # Phase 12b autonomous loop
+    runner.py           # tick() guard is_open else skip + build_graph invoke + scheduler_tick log; run_scheduler() APScheduler IntervalTrigger 5min jitter30 coalesce misfire300 or asyncio fallback; --scheduler/--once
+    market_hours.py     # is_market_open() via get_clock() TTL 60s, seconds_until_next_open()
+    state.py            # logs/scheduler.json {last_run, next_run, run_count, thread_id} atomic
+    __init__.py         # re-exports tick, run_scheduler
   core/
-    config.py           # pydantic-settings, reads .env — LLM_PROVIDER, LLM_MODEL_* compulsory, RISK_MAX_*, EXECUTION_MODE/HITL_ENABLED, MCP_SERVER_URL/COMMAND
-    logging.py          # structured JSON-line logger (_redact, log_event → logs/broker.jsonl)
+    config.py           # pydantic-settings, reads .env — LLM_PROVIDER, LLM_MODEL_* compulsory, RISK_MAX_*, EXECUTION_MODE/HITL_ENABLED, MCP_SERVER_URL/COMMAND, SCHEDULER_* (ENABLED/INTERVAL/THREAD/PROMPT)
+    logging.py          # structured JSON-line logger (_redact, log_event default=str → logs/broker.jsonl + scheduler_tick/skip)
     models.py           # shared pydantic models (TradeDecision, RiskVerdict)
     system_prompt.py    # central SYSTEM_PROMPT registry get_system_prompt(agent)
     utils.py            # get_model_id, handle_tool_errors, normalize_symbol, clamp_limit, count_tokens, TTLCache
-  logs/                 # gitignored, JSON-line output + .paused breaker flag
+  logs/                 # gitignored, JSON-line output + scheduler.json {last_run/next_run} + .paused breaker flag
   app/                  # legacy FastAPI — kept for /api/v1 broker surface (active, not removed)
     main.py             # FastAPI with /api/v1/account/positions/orders/clock + /health
     routers/broker.py   # 4 GETs under /api/v1
 ```
 
-**Phase 12 tools wired:** `research` now uses 9 tools (news + CLI + MCP); all 21 tools respect `25/min` + `30s` (CLI `8s`) and return `No data available...` on empty (never mock). See `docs/Agent_Architecture.md §11` + `docs/Backend_Architecture.md §4/5` + `docs/API_REFERENCE.md §7/8`.
+**Phase 12 tools wired:** `research` now uses 9 tools (news + CLI + MCP); all 25 tools respect `25/min` + `30s` (CLI `8s`) and return `No data available...` on empty (never mock). Scheduler `meanrev --scheduler` ticks every `SCHEDULER_INTERVAL_MIN` when `09:30-16:00 ET` open, else `scheduler_skip_closed`. See `docs/Agent_Architecture.md §11` + `docs/Backend_Architecture.md §4/5` + `docs/API_REFERENCE.md §7/8` + `docs/How_To_use.md §2/6`.

@@ -22,6 +22,16 @@ meanrev --mode auto --thread-id scoring-0831 --symbol SPY
 # → to run unattended in background (Windows):
 #   start /B meanrev --mode auto --thread-id scoring-0831
 
+# === Scheduler — autonomous every 5min when 09:30-16:00 ET open (Phase 12b, recommended for scoring) ===
+# .env: SCHEDULER_ENABLED=true  SCHEDULER_INTERVAL_MIN=5  SCHEDULER_THREAD_ID=scoring-0831  SCHEDULER_PROMPT="Do Research On BTC/USD And Propose a Order"
+meanrev --scheduler --thread-id scoring-0831
+# → immediate tick on start if market open, then every 5min (jitter 30s), skip if closed till 09:30, persists to logs/scheduler.json
+# → to run in background (Windows):
+#   start /B meanrev --scheduler --thread-id scoring-0831
+# → to test 1 tick without waiting (no live orders):
+#   meanrev --scheduler --dry-run --once
+#   python -m backend.scheduler.runner --dry-run --once
+
 # HITL mode — human approval for every order (for dry-run, large/risky orders, SPXW)
 # .env: EXECUTION_MODE=hitl  HITL_ENABLED=true  (or override via --mode hitl)
 meanrev --mode hitl --thread-id dry-run-01 --symbol AAPL
@@ -76,6 +86,8 @@ meanrev --mode auto --thread-id scoring-0831
 | `--thread-id` | any string | `cli` | LangGraph `thread_id` for `InMemorySaver` checkpointer persistence (prior regime continuity, HITL resume). Use same ID to resume a paused thread. |
 | `--symbol` | e.g., `AAPL`, `SPY` | `AAPL` | Default symbol for quick market checks in REPL (used by `get_market_snapshot` prefill) |
 | `--dry-run` | flag, no value | off | If set, `execution` does `dry_run_no_hitl` only — no live `submit_order`, only `submit_order` tool dry-run + log |
+| `--scheduler` | flag | off | **Phase 12b:** run autonomous loop (`scheduler/runner.py`) — every `SCHEDULER_INTERVAL_MIN` (default 5) when `09:30-16:00 ET` open (else `scheduler_skip_closed` till `next_open`), immediate tick on start, `logs/scheduler.json` persistence, `APScheduler` jitter 30/coalesce/misfire 300 or `asyncio` fallback |
+| `--once` | flag (with `--scheduler`) | off | With `--scheduler`, run single tick then exit (for tests): `meanrev --scheduler --dry-run --once` |
 | `--help` | — | — | Shows help |
 
 **Examples:**
@@ -133,6 +145,10 @@ Copy `backend/.env.example` to `backend/.env` and fill **only `.env`**:
 | | `MCP_SERVER_COMMAND` | *(empty)* | stdio command e.g. `npx -y @alpacahq/alpaca-mcp-server`; alternative to URL |
 | | `ALPACA_MCP_COMMAND` | alias | same as `MCP_SERVER_COMMAND` |
 | **Alpaca CLI** | *(no env, auto-detected)* | `alpaca` binary | `tools/alpaca_cli_tool._run_alpaca_cli` runs `alpaca account --json` etc. with 8s timeout + broker fallback |
+| **Scheduler** | `SCHEDULER_ENABLED` | `false` | `core/config` — if `true` + `meanrev --scheduler`, autonomous ticks; `false` = manual REPL only |
+| | `SCHEDULER_INTERVAL_MIN` | `5` | `scheduler/runner.IntervalTrigger(minutes=5, jitter=30)` — clamp 1..60 |
+| | `SCHEDULER_THREAD_ID` | `scheduler` | `InMemorySaver` thread for ticks (prior regime) — use `scoring-0831` for scoring |
+| | `SCHEDULER_PROMPT` | `Do Research On BTC/USD And Propose a Order` | Prompt for each tick (e.g. `Analyze SPY and propose a trade with options`) |
 | **Risk (deterministic)** | `RISK_MAX_POSITION_PCT` | `0.15` | `risk.check_position_limit` → `notional/equity <=15%` else `approved_scaled` |
 | | `RISK_MAX_EXPOSURE_PCT` | `0.60` | `check_exposure` → `gross/equity <=60%` |
 | | `RISK_DAILY_DRAWDOWN_PCT` | `0.03` | `check_drawdown` → `(equity-peak)/peak < -3%` → writes `logs/.paused` |
@@ -169,14 +185,25 @@ Copy `backend/.env.example` to `backend/.env` and fill **only `.env`**:
 ```bash
 python -m backend.cli --mode hitl --thread-id dry-run-01 --dry-run
 # In REPL: be more conservative today → /status → /report 20 reports/dry-run.md
+# Or scheduler dry-run 1 tick:
+python -m backend.scheduler.runner --dry-run --once
+# meanrev --scheduler --dry-run --once
 ```
 
 **Scoring window (autonomous, unattended):**
 ```bash
 # Fresh $100k paper account, .env: EXECUTION_MODE=auto HITL_ENABLED=false
+# Recommended: scheduler (every 5min when market open, persists to logs/scheduler.json)
+# .env: SCHEDULER_ENABLED=true SCHEDULER_INTERVAL_MIN=5 SCHEDULER_THREAD_ID=scoring-0831
+meanrev --scheduler --thread-id scoring-0831
+# → immediate tick if 09:30-16:00 ET open, then every 5min, skip if closed till next_open
+# → to run in background (Windows):
+#   start /B meanrev --scheduler --thread-id scoring-0831
+# Alternative: manual REPL loop (older, requires terminal stay open)
 python -m backend.cli --mode auto --thread-id scoring-0831 &
-# Logs to backend/logs/broker.jsonl, report via /report or API
+# Logs to backend/logs/broker.jsonl + scheduler.json {last_run, next_run, run_count}, report via /report or API
 curl http://localhost:8000/api/v1/account | jq .account.portfolio_value
+Get-Content backend\logs\broker.jsonl | findstr scheduler
 ```
 
 **Human approval for large order:**
@@ -210,5 +237,7 @@ venv/Scripts/python.exe -c "from backend.agents.reporting import reporting_agent
 | `No data available for this symbol/timeframe` (research→strategy hold) | Expected no-mock behavior — unknown/weekend symbol returns empty `fetch_ohlcv` → `strategy` HOLD 0 → `risk: no_trade`. Use real symbol e.g. `SPY` during market hours or check `logs/broker.jsonl` for `market_data_no_data` |
 | `source: alpaca_cli_fallback` + `alpaca CLI binary not found` | Normal when `alpaca` CLI not installed — fallback to broker works. Install via `pip install alpaca-trade-api` and verify `alpaca --version` to get `source: alpaca_cli` |
 | `source: mcp_fallback` + `mcp_not_configured` | Normal when `MCP_SERVER_URL` empty — fallback to broker works. Set `MCP_SERVER_URL=http://localhost:3000/sse` and run `npx @alpacahq/alpaca-mcp-server` for `source: mcp` |
+| `scheduler_skip_closed next_open 09:30` | Normal when market closed — scheduler waits till `09:30 ET` open, logs `scheduler_skip_closed` + persists `next_run`. Check `Get-Content backend\logs\scheduler.json` or `is_open` via `/api/v1/clock` |
+| `scheduler_skip_duplicate` | Normal when restarting within 5min — `logs/scheduler.json` `last_run` < `interval*0.8` ago, tick skipped for idempotence |
 
 *All flags are single source via `backend/.env.example` → `backend/core/config.py` (`get_settings()`) → `backend/core/utils.get_model_id()` / `backend/core/system_prompt.get_system_prompt()`.*

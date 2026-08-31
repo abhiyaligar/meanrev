@@ -3,7 +3,7 @@
 **Project:** Autonomous AI Trading Agent — Alpaca AI Trading Agents Hackathon (LabLab.ai)  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Principle:** No UI, autonomous agent workflow only. Risk v1 is deterministic rule-based. ML surrogate risk is deferred to v2.  
-**Last Updated:** Phase 12b — Order management tools (TOOLS 21→25: `set_stop_loss`, `modify_order`, `cancel_order`, `cancel_all_orders` via `broker/client` 25/min) + MCP/CLI 21, no-mock, UUID fix; prior: Phase 12 MCP/CLI 12→21
+**Last Updated:** Phase 12b — Autonomous scheduler (ticks every `SCHEDULER_INTERVAL_MIN` when `09:30-16:00 ET` open, `logs/scheduler.json` persistence, `APScheduler` + `asyncio` fallback) + order tools 21→25; prior: Phase 12 MCP/CLI 12→21
 
 ---
 
@@ -28,14 +28,15 @@ The system is designed as a single autonomous pipeline with distinct staged resp
 
 ## 3. High-Level System Overview
 
-The backend consists of six logical layers:
+The backend consists of seven logical layers:
 
-1.  **CLI Layer:** Interactive REPL for operator control and live observation.
-2.  **Orchestration Layer:** LangGraph state machine that sequences agents.
-3.  **Agent Layer:** Five specialized agents with distinct model assignments.
-4.  **Broker Layer:** Thin Alpaca integration with rate limiting and backoff.
-5.  **Data Layer:** Market data and news/sentiment ingestion plus indicator enrichment.
-6.  **Core Layer:** Configuration, shared domain models, and structured logging.
+1.  **CLI Layer:** Interactive REPL for operator control and live observation; `meanrev --scheduler` for unattended ticks.
+2.  **Scheduler Layer:** Autonomous loop (`backend/scheduler/`) — ticks every `SCHEDULER_INTERVAL_MIN` (default 5) **only when** `09:30-16:00 ET` open via `broker/client.get_clock()` (TTL 60s), persists `logs/scheduler.json` for crash resilience.
+3.  **Orchestration Layer:** LangGraph state machine that sequences agents (called by both REPL and scheduler).
+4.  **Agent Layer:** Five specialized agents with distinct model assignments.
+5.  **Broker Layer:** Thin Alpaca integration with rate limiting and backoff.
+6.  **Data Layer:** Market data and news/sentiment ingestion plus indicator enrichment.
+7.  **Core Layer:** Configuration, shared domain models, and structured logging.
 
 Supporting infrastructure includes optional Redis for token-bucket rate limiting and optional PostgreSQL with TimescaleDB for historical persistence. In v1, flat-file JSON-line logs are the primary audit trail and persistence is deferred.
 
@@ -63,6 +64,7 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 | Alpaca CLI | `backend/tools/alpaca_cli_tool.py` | `alpaca` CLI subprocess wrappers (`account/positions/orders/clock --json`) with broker fallback, 8s timeout; wired into research agent for Phase 12 bonus |
 | MCP Server | `backend/mcp/client.py` + `backend/tools/mcp_tools.py` | MCP bridge (`langchain_mcp_adapters` when `MCP_SERVER_URL` set) + 4 LangChain tools with broker fallback; config in `backend/mcp/server_config.example.json` |
 | Order Management | `backend/broker/client.py:cancel_order/cancel_all_orders/replace_order` + `backend/tools/broker_tools.py:set_stop_loss/modify_order/cancel_order/cancel_all_orders` | Live throttled 25/min; `set_stop_loss` auto-qty via position scan (slash-insensitive), crypto blocked with hint; `modify_order` via `ReplaceOrderRequest` qty/limit/stop/trail; `cancel_*` via `cancel_order_by_id` |
+| Scheduler | `backend/scheduler/runner.py` + `market_hours.py` + `state.py` | Autonomous `APScheduler IntervalTrigger(minutes=5, jitter=30, coalesce, misfire_grace_time=300, max_instances=1)` or `asyncio` fallback; immediate tick on start; market-hours guard `is_open` else `scheduler_skip_closed` till `next_open`; `logs/scheduler.json` `{last_run, next_run, run_count, thread_id}`; `SCHEDULER_*` via `.env` |
 | No-Mock Policy | `backend/data/market.py` + `backend/data/news.py` | Every empty fetch returns `[]` or `pd.DataFrame()` with `No data available for this ...` + `log_event` (`market_data_no_data`, `news_no_data`), never fabricated bars/headlines — `strategy` returns `risk: no_trade` on empty |
 
 **Explicitly excluded in v1:** FastAPI backend service and React plus Tailwind frontend. These were removed after confirmation that a UI is not required and incurs unnecessary scope. The ML surrogate risk model using XGBoost or LSTM over Monte Carlo paths is also excluded from v1 for timeline reasons.
@@ -73,16 +75,17 @@ Supporting infrastructure includes optional Redis for token-bucket rate limiting
 
 The project is structured around the agent graph, not generic feature folders.
 
-- **cli:** Houses the REPL entrypoint, the prompt loop and command routing, and the handlers for slash commands such as status, positions, report, pause, and resume.
+- **cli:** Houses the REPL entrypoint (`__main__.py` with `--mode/--thread-id/--symbol/--dry-run/--scheduler/--once`), the prompt loop and command routing, and the handlers for slash commands such as status, positions, report, pause, and resume.
+- **scheduler:** Autonomous loop for Phase 12b — `scheduler/runner.py` (APScheduler `IntervalTrigger(minutes=5, jitter=30, coalesce, misfire_grace_time=300)` or `asyncio` fallback, `tick()` with market-hours guard `is_open` else `scheduler_skip_closed`, immediate tick on start, `should_skip_duplicate` guard), `scheduler/market_hours.py` (TTL 60s `get_clock()` cache), `scheduler/state.py` (`logs/scheduler.json` atomic `{last_run, next_run, run_count, thread_id}`), wired as `meanrev --scheduler`.
 - **agents:** Contains one module per specialized agent: research, strategy, risk, execution, and reporting. Each module encapsulates its prompt (fetched from `core/system_prompt.py`), input contract, and output contract; `research`/`strategy`/`reporting` are built-in `create_agent` with `HumanInTheLoopMiddleware` for `submit_order`. `research` now imports 9 tools (3 news + 3 `alpaca_cli` + 3 `mcp`) for Phase 12 bonus; `research_agent` vs `get_research_agent()` factory covers sync+async MCP loading.
 - **graph:** Holds the shared LangGraph state schema (`GraphState` with 7 fields: `messages`, `market_snapshot`, `research`, `strategy`, `risk`, `execution`, `reporting_context`) and the wiring (`research→strategy→risk→execution` with `approved_scaled` handling and `InMemorySaver` checkpointer for HITL).
 - **broker:** Encapsulates the Alpaca client wrapper (`get_account`, `get_positions`, `get_orders`, `get_clock`, `submit_order` for `market/limit/stop/options`) and the Redis-backed rate limiting (`25/min` Lua + `tenacity` retry + `30s` timeout).
 - **data:** Separates market data handling (`fetch_ohlcv` + `VWAP` + `RSI/MACD/EMA/BB/ATR` via `pandas_ta`, `fetch_option_chain` with Greeks via `scipy` else `math`, `align_timeframes`, `cache` TTL, **no-mock**: empty `AAPL` weekend or unknown symbol returns `pd.DataFrame()` + `log_event("market_data_no_data", "No data available for this symbol/timeframe")`) from news and sentiment fetching (`fetch_news`, `get_macro_calendar`, `extract_keywords`, also no-mock with `news_no_data`/`macro_calendar_no_data`).
 - **tools:** LangChain `@tool` wrappers — 25 tools total: `broker_tools` (9: `get_account/positions/orders/clock`, `submit_order`, `set_stop_loss`, `modify_order`, `cancel_order`, `cancel_all_orders`), `market_tools` (5 + `detect_arbitrage`), `news_tools` (3), `alpaca_cli_tool` (4 via subprocess + broker fallback), `mcp_tools` (4 via MCP bridge + broker fallback). All respect `25/min` + `30s` timeout (CLI 8s), order-mutating 5 are HITL-protected via `BROKER_WRITE_TOOLS`. Grouped as `TOOLS`, `BROKER_TOOLS`, `BROKER_WRITE_TOOLS` (5), `ALPACA_CLI_TOOLS`, `MCP_TOOLS`, `MARKET_TOOLS`, `NEWS_TOOLS`.
 - **mcp:** MCP bridge for Phase 12 bonus — `mcp/client.py` (`is_mcp_configured`, `get_mcp_tools`, `aget_mcp_tools`, `mcp_server_info`) + `mcp/server_config.example.json` + `tools/mcp_tools.py` wrapping Alpaca MCP Server when `MCP_SERVER_URL`/`MCP_SERVER_COMMAND` set, else broker fallback.
-- **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`, `MCP_SERVER_URL/COMMAND`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
-- **logs:** Gitignored directory for JSON-line output (`broker.jsonl`, `.paused` flag for circuit breaker) that serves as the authoritative audit trail.
-- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`, `MCP_SERVER_URL/COMMAND`), ignore rules, Python project manifest (`pyproject.toml` with `meanrev` entry), and single-command wrappers (`meanrev`, `meanrev.bat`).
+- **core:** Centralizes configuration management (`config.py` with `LLM_PROVIDER`, `LLM_MODEL_*` compulsory from `.env`, `RISK_MAX_*`, `EXECUTION_MODE`/`HITL_ENABLED`, `MCP_SERVER_URL/COMMAND`, `SCHEDULER_ENABLED/INTERVAL_MIN/THREAD_ID/PROMPT`), structured logging (`logging.py` with `_redact`), shared domain models (`models.py`), system prompts (`system_prompt.py` + `System_Prompt.py`), and DRY utils (`utils.py`).
+- **logs:** Gitignored directory for JSON-line output (`broker.jsonl`, `scheduler.json` (`{last_run, next_run, run_count}` for 12b), `.paused` flag for circuit breaker) that serves as the authoritative audit trail.
+- **Root configuration:** Environment template (`backend/.env.example` with `LLM_MODEL_*`, `RISK_MAX_*`, `EXECUTION_MODE`, `MCP_SERVER_URL/COMMAND`, `SCHEDULER_*`), ignore rules, Python project manifest (`pyproject.toml` with `meanrev` entry + `apscheduler`), and single-command wrappers (`meanrev`, `meanrev.bat`).
 
 This layout ensures that a change to risk logic, execution throttling, or strategy prompting is isolated to a single directory with a clear ownership boundary.
 
@@ -95,7 +98,8 @@ This layout ensures that a change to risk logic, execution throttling, or strate
 - Provides an interactive REPL that remains open for the operator while agents run. Single entry `meanrev` (via `pyproject.toml` `[project.scripts]` → `venv/Scripts/meanrev.exe`, plus `meanrev.bat`/`meanrev` wrappers) like `claude`/`codex` — `meanrev --mode auto --thread-id scoring-0831` or `python -m backend.cli`.
 - Routes natural-language input to the agent graph as instructions and routes slash commands to direct handlers.
 - Streams agent steps live to the terminal via `rich.live.Live` while the same events are persisted to the structured log.
-- Exposes commands for operational control and inspection without requiring a browser or dashboard — see `How_To_use.md` for flag table (`--mode`, `--thread-id`, `--symbol`, `--dry-run`).
+- Exposes commands for operational control and inspection without requiring a browser or dashboard — see `How_To_use.md` for flag table (`--mode`, `--thread-id`, `--symbol`, `--dry-run`, `--scheduler`, `--once`).
+- Scheduler mode `meanrev --scheduler --thread-id scoring-0831` runs unattended (`APScheduler` every `SCHEDULER_INTERVAL_MIN` when `09:30-16:00 ET` open, else `scheduler_skip_closed` till `next_open`), logs `scheduler_tick`/`scheduler_skip_closed` to `broker.jsonl` and persists `logs/scheduler.json`.
 
 ### 6.2 Orchestration Layer
 

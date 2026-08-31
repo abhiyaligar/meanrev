@@ -258,9 +258,9 @@ Acceptance: A natural-language instruction is forwarded to the graph and reflect
 | Fri Aug 28, 11:00 a.m. ET | Hackathon kick-off. Confirm Alpaca credentials, MCP or CLI access, and market data availability. |
 | Fri Aug 28 – Sun Aug 30 | Build and stabilize the five-agent graph, CLI, broker throttling, risk thresholds, and structured logging. Run against the development paper account. |
 | Sun Aug 30 | Create the new dedicated submission paper account with 100,000 dollars. Configure the submission environment. |
-| Sun Aug 30 – Mon Aug 31 morning | Dry-run the full pipeline end to end against the submission account. Fix auth, rate limit, or prompt issues outside the scoring window. |
-| Mon Aug 31, 9:30 a.m. ET | Scoring window opens. Agent runs live from the submission account. |
-| Mon Aug 31 – Fri Sep 4 | Operate the system, monitor via CLI, respond to circuit breaker pauses, generate reports, collect evidence for the write-up and demo. |
+| Sun Aug 30 – Mon Aug 31 morning | Dry-run the full pipeline end to end against the submission account. Fix auth, rate limit, or prompt issues outside the scoring window. Test `meanrev --scheduler --dry-run --once` for 12b. |
+| Mon Aug 31, 9:30 a.m. ET | Scoring window opens. Agent runs live from the submission account via `meanrev --scheduler --thread-id scoring-0831` (ticks every `SCHEDULER_INTERVAL_MIN` when `09:30-16:00 ET` open, else `scheduler_skip_closed` till `next_open`, persists `logs/scheduler.json`). |
+| Mon Aug 31 – Fri Sep 4 | Operate the system (scheduler autonomous, or `meanrev --mode auto` manual), monitor via CLI/logs, respond to circuit breaker pauses, generate reports, collect evidence for the write-up and demo. |
 | Fri Sep 4, 11:00 a.m. ET | Scoring window closes. Freeze the account, generate the final report from the log, and submit the write-up, account identifier, and demo materials. |
 
 ---

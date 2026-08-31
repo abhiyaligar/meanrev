@@ -6,7 +6,7 @@
 **Auth:** None on HTTP — server uses `ALPACA_API_KEY` / `ALPACA_API_SECRET` from environment (gitignored, never logged). Paper trading enforced (`paper=True`).  
 **Rate Limit:** 25 req/min leaky bucket (Redis-backed Lua + `InMemory` fallback) shared across all `/api/v1` calls + `tenacity` exponential backoff + jitter on 429/5xx/timeout (30s hard timeout).  
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
-**Last Updated:** Phase 12b — Order management (TOOLS 21→25: `set_stop_loss`, `modify_order`, `cancel_order`, `cancel_all_orders` live via `broker/client` throttled), prior: Phase 12 MCP/CLI 21 + no-mock
+**Last Updated:** Phase 12b — Autonomous scheduler ( `scheduler/runner.py` `IntervalTrigger` when `09:30-16:00 ET` open, `logs/scheduler.json` persistence) + order tools 21→25 + MCP/CLI; prior: Phase 12 MCP/CLI 21
 
 ---
 
@@ -232,25 +232,31 @@ backend/
   data/
     market.py       # fetch_ohlcv (Stock+Crypto BTC/USD, derived BTC/ETH), VWAP 1m/5m/1h/1d, RSI/MACD/EMA/BB/ATR, option chain no-mock
     news.py         # fetch_news/macro no-mock (returns [] + news_no_data log)
+  scheduler/        # Phase 12b autonomous loop
+    runner.py       # tick() market guard is_open else skip + build_graph invoke + logs/scheduler.json persist; run_scheduler() APScheduler (jitter 30, coalesce, misfire 300) or asyncio fallback; immediate tick on start; --scheduler/--once CLI
+    market_hours.py # is_market_open() via broker/client.get_clock() TTL 60s cache, seconds_until_next_open()
+    state.py        # load/save scheduler state logs/scheduler.json {last_run, next_run, run_count, thread_id, interval_min} atomic
+    __init__.py     # re-exports run_scheduler, tick
   core/
     models.py       # AccountResponse, PositionsResponse, OrdersResponse, ClockResponse, ErrorResponse
-    logging.py      # JSON-line logger → logs/broker.jsonl, _redact, log_event
-    config.py       # LLM_PROVIDER, LLM_MODEL_*, RISK_MAX_*, EXECUTION_MODE/HITL_ENABLED, MCP_SERVER_URL/COMMAND
-    utils.py        # get_model_id, handle_tool_errors, normalize_symbol, clamp_limit
+    logging.py      # JSON-line logger → logs/broker.jsonl + scheduler_tick/skip logs, _redact, log_event default=str
+    config.py       # LLM_PROVIDER, LLM_MODEL_*, RISK_MAX_*, EXECUTION_MODE/HITL_ENABLED, MCP_SERVER_URL/COMMAND, SCHEDULER_ENABLED/INTERVAL_MIN/THREAD_ID/PROMPT
+    utils.py        # get_model_id, handle_tool_errors, normalize_symbol, clamp_limit, TTLCache
   app/              # FastAPI host — active in v1 for /api/v1 broker surface (not removed)
     main.py         # FastAPI(title="Meanrev Alpaca API", version="0.1.0") + include_router(broker)
     routers/
       broker.py     # 4 GETs under /api/v1 (active)
       alpaca.py     # legacy GET /get_account — deprecated alias, remove in v2
   logs/
-    broker.jsonl    # gitignored, structured audit trail (includes source: alpaca_cli vs fallback, mcp vs fallback, market_data_no_data)
+    broker.jsonl    # gitignored, structured audit trail (includes source: alpaca_cli vs fallback, mcp vs fallback, market_data_no_data, scheduler_tick/skip)
+    scheduler.json  # gitignored, scheduler persistence {last_run, next_run, run_count, thread_id} + .paused breaker
 ```
 
 ---
 
 ## 8. Tool Surface (LangChain) — Phase 12 Additions
 
-Beyond HTTP, agents use 21 LangChain `@tool` wrappers (all throttled/fallback, no mock):
+Beyond HTTP, agents use 25 LangChain `@tool` wrappers (all throttled/fallback, no mock) + scheduler `tick()` calls `build_graph` directly:
 
 | Group | Tools | Source file | Notes |
 | :--- | :--- | :--- | :--- |
