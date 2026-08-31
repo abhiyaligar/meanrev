@@ -81,3 +81,8 @@ Thumbs.db
 # --- Phases ---
 PHASES.md
 Phase.md
+# --- Testing / coverage ---
+.coverage
+htmlcov/
+.pytest_cache/
+
