@@ -15,11 +15,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from backend.core.logging import log_event
+from backend.core.utils import TTLCache
 
-# Simple cache
-_NEWS_CACHE: Dict[str, tuple[float, List[Dict[str, str]]]] = {}
-_MACRO_CACHE: tuple[float, List[Dict[str, str]]] | None = None
-CACHE_TTL = 300  # 5 min
+# Library-backed TTL cache via core/utils (cachetools) — replaces custom dict tuple
+_NEWS_CACHE = TTLCache(maxsize=200, ttl=300)
+_MACRO_CACHE = TTLCache(maxsize=10, ttl=300)  # single key "macro"
+CACHE_TTL = 300  # kept for compatibility, actual TTL is in TTLCache
 
 
 def _sentiment_score(text: str) -> float:
@@ -104,9 +105,9 @@ def fetch_news(
 
     sym_key = ",".join(sorted(s.upper() for s in symbols)) if symbols else "general"
     cache_key = f"{sym_key}:{lim}"
-    entry = _NEWS_CACHE.get(cache_key)
-    if entry and time.time() - entry[0] < CACHE_TTL:
-        return entry[1][:lim]
+    cached = _NEWS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached[:lim]
 
     headlines: List[Dict[str, str]] = []
     tried_alpaca = False
@@ -174,7 +175,7 @@ def fetch_news(
     if not headlines:
         log_event("news_no_data", symbols=sym_key, reason="No data available for this symbols/timeframe (Alpaca returned 0 headlines)")
         # Return empty list — tools and research will output "No data available for this"
-        _NEWS_CACHE[cache_key] = (time.time(), [])
+        _NEWS_CACHE.set(cache_key, [])
         return []
 
     # Enrich with string sentiment label
@@ -190,7 +191,7 @@ def fetch_news(
         else:
             h["sentiment"] = "neutral"
 
-    _NEWS_CACHE[cache_key] = (time.time(), headlines)
+    _NEWS_CACHE.set(cache_key, headlines)
     return headlines[:lim]
 
 
@@ -199,15 +200,16 @@ def get_macro_calendar(days_ahead: int = 7) -> List[Dict[str, str]]:
     Return upcoming macro catalysts: Fed speeches, NFP, CPI, earnings, benchmark revisions.
     No mock fallback — if no external calendar API is configured, returns empty with log.
     Caller should handle empty as "No data available for this".
+    Uses library-backed TTLCache (cachetools) via core/utils.
     """
-    global _MACRO_CACHE
-    if _MACRO_CACHE and time.time() - _MACRO_CACHE[0] < CACHE_TTL:
-        return _MACRO_CACHE[1]
+    cached = _MACRO_CACHE.get("macro")
+    if cached is not None:
+        return cached
 
     # No external calendar API configured for real data — return empty with message
     # (Previous mock calendar removed per user request: no mock data)
     log_event("macro_calendar_no_data", reason="No data available for macro calendar (no external API configured)")
-    _MACRO_CACHE = (time.time(), [])
+    _MACRO_CACHE.set("macro", [])
     return []
 
 

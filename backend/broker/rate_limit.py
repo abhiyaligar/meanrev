@@ -270,6 +270,9 @@ def backoff_delay(attempt: int) -> float:
     """
     Exponential backoff with jitter: base * 2**attempt ± 20% jitter.
     attempt 0 → ~0.5s, 1 → ~1.0s, 2 → ~2.0s, capped at MAX_BACKOFF_SECONDS.
+
+    Note: Production retry in broker/client uses tenacity.wait_exponential_jitter (library, single source).
+    This helper is kept for unit tests that assert jitter range 0.4-0.6 for attempt 0 and cap 8s.
     """
     delay = BASE_BACKOFF_SECONDS * (2**attempt)
     delay = min(delay, MAX_BACKOFF_SECONDS)

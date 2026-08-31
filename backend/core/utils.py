@@ -1,11 +1,13 @@
 """
 Core utils — single source for duplicate helpers per DRY.
 
-Consolidates functions that were duplicated across agents/graph/tools:
+Consolidates functions that were duplicated across agents/graph/tools/broker/data:
 - get_model_id() — was 4x duplicated in research/strategy/reporting/graph
 - handle_tool_errors — was 3x duplicated via @wrap_tool_call
 - normalize_symbol — was duplicated in broker/client, tools, data
 - clamp_limit — was duplicated in broker/client, tools, data
+- is_crypto_symbol / is_option_symbol — was duplicated in broker/client ↔ data/market ↔ tools
+- TTLCache — library-backed via cachetools, replaces 2x custom _CACHE dicts in market/news
 """
 
 from typing import Optional
@@ -171,3 +173,37 @@ class TTLCache:
             self._cache.clear()
         else:
             self._store.clear()
+
+
+def is_crypto_symbol(symbol: Optional[str]) -> bool:
+    """Single source for crypto detection — replaces duplicated _is_crypto_symbol in broker/client ↔ data/market."""
+    if not symbol or not str(symbol).strip():
+        return False
+    s = str(symbol).strip().upper().replace(" ", "")
+    if "/" in s:
+        base = s.split("/")[0]
+        return base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM")
+    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT"):
+        return True
+    if s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "BTCUSDT", "ETHUSDT"):
+        return True
+    for base in ("BTC", "ETH", "SOL", "DOGE"):
+        if s.startswith(base) and (s == base or s.endswith("USD") or s.endswith("USDT")):
+            return True
+    return False
+
+
+def is_option_symbol(symbol: Optional[str]) -> bool:
+    """Single source for option detection — replaces duplicated _is_option_symbol in broker/client."""
+    if is_crypto_symbol(symbol):
+        return False
+    s = str(symbol or "").upper()
+    if s.startswith(("SPXW", "XSP", "SPX", "NDX", "RUT")):
+        return True
+    # OCC: e.g. AAPL240830C00150000 — underlying (1-6) + 6-digit date + C/P + 8-digit strike, len >= 15, last 8 digits are strike
+    if len(s) >= 15 and s[-8:].isdigit() and ("C" in s[-9:-8] or "P" in s[-9:-8]):
+        return True
+    # Fallback: at least contains C/P and 6-digit date pattern
+    if len(s) >= 15 and any(c in s for c in ("C", "P")) and s[-8:].isdigit():
+        return True
+    return False

@@ -21,10 +21,16 @@ except Exception:
 from backend.broker.rate_limit import bucket, RateLimitExceeded
 from backend.core.config import get_settings
 from backend.core.logging import log_event
+from backend.core.utils import TTLCache, is_crypto_symbol as _is_crypto_symbol_lib
 
-# Simple in-memory cache with TTL (seconds) to respect free-tier limits
-_CACHE: Dict[str, tuple[float, pd.DataFrame]] = {}
-CACHE_TTL = 60  # 1 min for intraday, 5 min for daily handled below
+# Library-backed TTL cache via core/utils (cachetools) — replaces custom dict
+# Two caches to preserve original per-timeframe TTL: 60s intraday, 300s daily
+_CACHE_INTRADAY = TTLCache(maxsize=200, ttl=60)
+_CACHE_DAILY = TTLCache(maxsize=50, ttl=300)
+# Backward compat alias — old code checks _CACHE directly in tests, keep as dict view
+# We keep a property-like dict for len checks, but primary storage is TTLCache
+_CACHE: Dict[str, tuple[float, pd.DataFrame]] = {}  # deprecated, kept for grep compatibility
+CACHE_TTL = 60
 DAILY_TTL = 300
 
 
@@ -33,44 +39,21 @@ def _cache_key(symbol: str, timeframe: str, limit: int) -> str:
 
 
 def _get_cached(key: str) -> Optional[pd.DataFrame]:
-    entry = _CACHE.get(key)
-    if not entry:
-        return None
-    ts, df = entry
-    ttl = DAILY_TTL if "Day" in key else CACHE_TTL
-    if time.time() - ts > ttl:
-        _CACHE.pop(key, None)
-        return None
-    return df.copy()
+    # Use library TTLCache with per-key TTL (Day vs intraday)
+    val = _CACHE_DAILY.get(key) if "Day" in key else _CACHE_INTRADAY.get(key)
+    return val.copy() if isinstance(val, pd.DataFrame) else None
 
 
 def _set_cached(key: str, df: pd.DataFrame) -> None:
-    _CACHE[key] = (time.time(), df.copy())
-    # Cap cache size
-    if len(_CACHE) > 200:
-        oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
-        _CACHE.pop(oldest, None)
+    if "Day" in key:
+        _CACHE_DAILY.set(key, df.copy())
+    else:
+        _CACHE_INTRADAY.set(key, df.copy())
 
 
 def _is_crypto_symbol(symbol: str) -> bool:
-    """Detect crypto symbol: BTC/USD, BTCUSD, BTC, ETH, SOL, etc."""
-    if not symbol:
-        return False
-    s = symbol.strip().upper().replace(" ", "")
-    # Direct crypto pairs
-    if "/" in s:
-        base = s.split("/")[0]
-        return base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM")
-    # Without slash
-    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM"):
-        return True
-    if s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "BTCUSDT", "ETHUSDT"):
-        return True
-    # Heuristic: ends with USD/USDT and base is crypto
-    for base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC"):
-        if s.startswith(base) and (s == base or s.endswith("USD") or s.endswith("USDT")):
-            return True
-    return False
+    """Detect crypto symbol: BTC/USD, BTCUSD, BTC, ETH, SOL, etc. — delegates to backend/core/utils (single source)."""
+    return _is_crypto_symbol_lib(symbol)
 
 
 def _normalize_crypto_symbol(symbol: str) -> str:

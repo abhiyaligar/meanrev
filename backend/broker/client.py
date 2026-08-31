@@ -26,7 +26,11 @@ from alpaca.trading.enums import QueryOrderStatus
 
 from backend.broker.rate_limit import MAX_RETRIES, RateLimitExceeded, bucket, is_retryable_exception
 from backend.core.config import get_settings
-from backend.core.utils import clamp_limit, normalize_symbol
+from backend.core.utils import clamp_limit, is_crypto_symbol, is_option_symbol, normalize_symbol
+
+# Backward compat aliases — other modules imported _is_crypto_symbol from broker.client
+_is_crypto_symbol = is_crypto_symbol
+_is_option_symbol = is_option_symbol
 
 
 class AlpacaConnectionError(Exception):
@@ -407,32 +411,5 @@ def replace_order(
     return _call_with_retry(_do)  # type: ignore
 
 
-def _is_crypto_symbol(sym: str) -> bool:
-    """Detect crypto for qty/time_in_force handling (BTC/USD, BTC, ETH/USD etc.)."""
-    if not sym:
-        return False
-    s = sym.strip().upper().replace(" ", "")
-    if "/" in s:
-        base = s.split("/")[0]
-        return base in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT", "LINK", "UNI", "ATOM")
-    if s in ("BTC", "ETH", "SOL", "DOGE", "AVAX", "MATIC", "LTC", "BCH", "XRP", "ADA", "DOT"):
-        return True
-    if s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "BTCUSDT", "ETHUSDT"):
-        return True
-    for base in ("BTC", "ETH", "SOL", "DOGE"):
-        if s.startswith(base) and (s == base or s.endswith("USD") or s.endswith("USDT")):
-            return True
-    return False
-
-
-def _is_option_symbol(sym: str) -> bool:
-    """Heuristic for option symbol vs equity: option symbols are long and contain date+strike, or SPXW family."""
-    if _is_crypto_symbol(sym):
-        return False
-    s = sym.upper()
-    if s.startswith(("SPXW", "XSP", "SPX", "NDX", "RUT")):
-        return True
-    # Typical OCC option symbol: AAPL + 6-digit date + C/P + 8-digit strike -> len >= 15
-    if len(s) >= 15 and s[-9:-1].isdigit():
-        return True
-    return False
+# _is_crypto_symbol / _is_option_symbol now centralized in backend/core/utils.py
+# Aliases above ( _is_crypto_symbol = is_crypto_symbol ) keep backward compat for tools importing from broker.client
