@@ -16,7 +16,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolCallLimitMiddleware
 
 from backend.core.logging import log_event
-from backend.core.system_prompt import STRATEGY_SYSTEM_PROMPT
+from backend.core.system_prompt import GRAPH_STRATEGY_PROMPT_TEMPLATE, STRATEGY_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.broker_tools import get_account, get_clock, get_orders, get_positions, submit_order
 from backend.tools.market_tools import align_timeframes_tool, detect_arbitrage, get_market_snapshot, get_ohlcv, get_option_chain
@@ -287,8 +287,8 @@ def strategy_agent(state: dict) -> dict:
                 raise RuntimeError("strategy agent not available")
 
             research_out = state.get("research", {})
-            # Build prompt and enforce token limit (9.1)
-            base_prompt = f"Research: {research_out}. Now synthesize with market data (use get_ohlcv for AAPL/SPY) and options (get_option_chain) to propose a trade. Every strategy must consider options."
+            # Build prompt and enforce token limit (9.1) — central template from system_prompt.py, no hardcoded string
+            base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
             # Count tokens and truncate research if needed
             full_prompt = f"{STRATEGY_SYSTEM_PROMPT}\n\n{base_prompt}"
             model_id = _model_id()
@@ -297,7 +297,7 @@ def strategy_agent(state: dict) -> dict:
                 if isinstance(research_out, dict) and "catalyst_summary" in research_out:
                     research_out = dict(research_out)
                     research_out["catalyst_summary"] = str(research_out["catalyst_summary"])[:500] + "...[truncated]"
-                    base_prompt = f"Research: {research_out}. Now synthesize with market data (use get_ohlcv for AAPL/SPY) and options (get_option_chain) to propose a trade. Every strategy must consider options."
+                    base_prompt = GRAPH_STRATEGY_PROMPT_TEMPLATE.format(research=research_out)
                     base_prompt = enforce_token_limit(base_prompt, 1000, model_id)
 
             msgs = state.get("messages", []) + [{"role": "user", "content": base_prompt}]

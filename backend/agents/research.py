@@ -13,7 +13,7 @@ from langchain.agents.middleware import ToolCallLimitMiddleware
 from pydantic import BaseModel, Field
 
 from backend.core.logging import log_event
-from backend.core.system_prompt import RESEARCH_SYSTEM_PROMPT
+from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, RESEARCH_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.alpaca_cli_tool import alpaca_cli_account, alpaca_cli_clock, alpaca_cli_orders, alpaca_cli_positions
 from backend.tools.mcp_tools import mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
@@ -190,8 +190,8 @@ def research_agent(state: dict) -> dict:
     prior_regime = get_prior_regime(state)
     prior_note = f" Prior regime: {prior_regime} (for continuity)." if prior_regime else ""
 
-    # Build prompt with token limit (10.1)
-    base_prompt = f"Perform market research: fetch news and macro calendar, output sentiment and regime as JSON.{prior_note}"
+    # Build prompt with token limit (10.1) — base from central system_prompt.py (no hardcoded string)
+    base_prompt = f"{GRAPH_RESEARCH_PROMPT}{prior_note}"
     full_prompt = f"{RESEARCH_SYSTEM_PROMPT}\n\n{base_prompt}"
     model_id = _model_id()
     if count_tokens(full_prompt, model_id) > 1000:
