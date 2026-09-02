@@ -7,9 +7,11 @@ All calls cached (5 min) and never log secrets; sentiment via lexicon.
 
 import json
 from langchain.tools import tool
-
-from backend.data.news import extract_keywords as _extract_keywords, fetch_news as _fetch_news, get_macro_calendar as _get_macro_calendar
-
+from backend.data.news import (
+    extract_keywords as _extract_keywords,
+    fetch_news as _fetch_news,
+    get_macro_calendar as _get_macro_calendar,
+)
 
 @tool
 def fetch_news(symbols: str = "", limit: int = 10) -> str:
@@ -31,7 +33,10 @@ def fetch_news(symbols: str = "", limit: int = 10) -> str:
 
 @tool
 def get_macro_calendar(days_ahead: int = 7) -> str:
-    """Get upcoming macro catalysts (Fed speeches, NFP, CPI, earnings, benchmark revisions). Args: days_ahead 1..30 (default 7). Returns list of {event, date, importance, description}."""
+    """Get upcoming/latest US macro catalysts, grouped by source. Args: days_ahead 1..30 (default 7) — only affects the finnhub window; fred is always the latest print.
+    Returns {"finnhub": {"count": int, "events": [{event, time, country, actual, estimate, prev, source}]},
+             "fred": {"count": int, "events": [{event, time, value, series_id, source}]}}.
+    "finnhub" events are forward-looking (scheduled within days_ahead). "fred" events are the latest confirmed CPI/NFP/Unemployment/Fed Funds prints, not forward-looking. Either list may be empty — that's a valid result, not an error."""
     try:
         try:
             d = int(days_ahead)
@@ -39,7 +44,15 @@ def get_macro_calendar(days_ahead: int = 7) -> str:
             d = 7
         d = max(1, min(d, 30))
         cal = _get_macro_calendar(days_ahead=d)
-        return json.dumps({"count": len(cal), "calendar": cal}, default=str)
+        finnhub_events = cal.get("finnhub", [])
+        fred_events = cal.get("fred", [])
+        return json.dumps(
+            {
+                "finnhub": {"count": len(finnhub_events), "events": finnhub_events},
+                "fred": {"count": len(fred_events), "events": fred_events},
+            },
+            default=str,
+        )
     except Exception as e:
         return json.dumps({"error": str(e), "type": type(e).__name__})
 

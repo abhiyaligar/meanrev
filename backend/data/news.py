@@ -1,360 +1,398 @@
-"""
-News and macro catalyst data — Phase 4.3
-
-- News fetch (Alpaca News API when configured, else mock for offline dev)
-- Sentiment scoring (headline sentiment, social velocity stub, keyword extraction)
-- Macro calendar (Fed speeches, NFP, CPI, earnings, benchmark revisions)
-
-All functions return normalized dicts ready for Research agent (Claude).
-Rate-limited and cached to respect free-tier limits; never logs secrets.
-"""
-
+import os
 import re
-import time
+import requests
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
-
 from backend.core.logging import log_event
 from backend.core.utils import TTLCache
+from backend.core.config import get_settings
 
-# Library-backed TTL cache via core/utils (cachetools) — replaces custom dict tuple
+# Library-backed TTL cache via core/utils (cachetools)
 _NEWS_CACHE = TTLCache(maxsize=200, ttl=300)
-_MACRO_CACHE = TTLCache(maxsize=10, ttl=300)  # single key "macro"
-CACHE_TTL = 300  # kept for compatibility, actual TTL is in TTLCache
+_MACRO_CACHE = TTLCache(maxsize=10, ttl=300)  # keyed by days_ahead
+CACHE_TTL = 300  # kept for compatibility, actual TTL lives in TTLCache
+
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "is",
+    "are", "was", "were", "will", "be", "as", "at", "by", "with", "from",
+    "after", "amid", "over", "into", "its", "it", "this", "that", "than",
+    "ahead", "could", "market", "fed",
+}
+
+# --- Sentiment backend -------------------------------------------------
+#
+# Primary: Loughran-McDonald finance lexicon via `pysentiment2` — a word
+# list built from actual financial filings, so finance-neutral words like
+# "tax", "cost", "liability" aren't misread as negative the way they would
+# be with a general-purpose lexicon. No model download, still fast (word
+# lookup, not inference).
+#
+# Fallback: small hand-rolled keyword lexicon, used only if pysentiment2
+# isn't installed, so this module keeps working without the dependency.
+
+_LM = None
+_LM_LOAD_FAILED = False
+
+_FALLBACK_POSITIVE = {
+    "beat", "beats", "surge", "surged", "rally", "gains", "gain", "up",
+    "rise", "rises", "record", "high", "growth", "strong", "bullish",
+    "buy", "upgrade", "optimism",
+}
+_FALLBACK_NEGATIVE = {
+    "miss", "misses", "plunge", "drop", "drops", "fall", "falls", "down",
+    "decline", "weak", "bearish", "sell", "downgrade", "cut", "loss",
+    "losses", "fear", "recession",
+}
+
+
+def _get_lm():
+    """Lazily load the Loughran-McDonald lexicon. Cached after first call."""
+    global _LM, _LM_LOAD_FAILED
+    if _LM is not None or _LM_LOAD_FAILED:
+        return _LM
+    try:
+        import pysentiment2 as ps  # type: ignore
+
+        _LM = ps.LM()
+        log_event("sentiment_backend_ready", backend="loughran_mcdonald")
+    except Exception as e:
+        _LM_LOAD_FAILED = True
+        log_event("sentiment_backend_fallback", level="warning", reason=str(e)[:200])
+    return _LM
+
+
+def _sentiment_score_fallback(text: str) -> float:
+    """General-purpose keyword lexicon. Used only if pysentiment2 is unavailable."""
+    words = re.findall(r"\w+", text.lower())
+    if not words:
+        return 0.0
+    score = sum(
+        1 if w in _FALLBACK_POSITIVE else -1 if w in _FALLBACK_NEGATIVE else 0
+        for w in words
+    )
+    return max(-1.0, min(1.0, score / max(5, len(words) * 0.3)))
 
 
 def _sentiment_score(text: str) -> float:
     """
-    Lightweight headline sentiment in [-1,1].
-    Uses keyword lexicon (no external call) — deterministic, fast, testable.
-    Positive words +1, negative -1, normalized by word count.
+    Headline sentiment in [-1, 1], using the Loughran-McDonald finance
+    lexicon when available (polarity = (pos - neg) / (pos + neg) over
+    LM-tagged words), falling back to a generic keyword lexicon otherwise.
     """
     if not text:
         return 0.0
-    positive = {
-        "beat",
-        "beats",
-        "surge",
-        "surged",
-        "rally",
-        "gains",
-        "gain",
-        "up",
-        "rise",
-        "rises",
-        "record",
-        "high",
-        "growth",
-        "strong",
-        "bullish",
-        "buy",
-        "upgrade",
-        "optimism",
-    }
-    negative = {
-        "miss",
-        "misses",
-        "plunge",
-        "drop",
-        "drops",
-        "fall",
-        "falls",
-        "down",
-        "decline",
-        "weak",
-        "bearish",
-        "sell",
-        "downgrade",
-        "cut",
-        "loss",
-        "losses",
-        "fear",
-        "recession",
-    }
-    words = re.findall(r"\w+", text.lower())
-    if not words:
-        return 0.0
-    score = 0
-    for w in words:
-        if w in positive:
-            score += 1
-        elif w in negative:
-            score -= 1
-    # Normalize to [-1,1] with dampening
-    return max(-1.0, min(1.0, score / max(5, len(words) * 0.3)))
+
+    lm = _get_lm()
+    if lm is not None:
+        try:
+            tokens = lm.tokenize(text)
+            if not tokens:
+                return 0.0
+            score = lm.get_score(tokens)
+            polarity = score.get("Polarity", 0.0)
+            return max(-1.0, min(1.0, float(polarity)))
+        except Exception as e:
+            log_event("sentiment_score_lm_error", level="warning", error=str(e)[:200])
+            # fall through to fallback lexicon for this call
+
+    return _sentiment_score_fallback(text)
 
 
-def fetch_news(
-    symbols: Optional[List[str]] = None,
-    limit: int = 20,
-) -> List[Dict[str, str]]:
+def _sentiment_label(score: float) -> str:
+    if score > 0.2:
+        return "bullish"
+    if score < -0.2:
+        return "bearish"
+    return "neutral"
+
+
+# --- News fetch ----------------------------------------------------------
+
+def _normalize_symbols(symbols: Optional[List[str]]) -> Optional[List[str]]:
+    if not symbols:
+        return None
+    return sorted(s.upper() for s in symbols)
+
+
+def _fetch_from_alpaca(symbols: Optional[List[str]], limit: int) -> List[Dict[str, str]]:
+    """Attempt to fetch headlines from Alpaca's NewsClient. Returns [] on any failure."""
+    settings = get_settings()
+    key = settings.get_key()
+    secret = settings.get_secret()
+    if not (key and secret):
+        return []
+
+    from alpaca.data.historical import NewsClient  # type: ignore
+    from alpaca.data.requests import NewsRequest  # type: ignore
+
+    client = NewsClient(api_key=key, secret_key=secret)
+    try:
+        req = NewsRequest(symbols=",".join(symbols), limit=limit) if symbols else NewsRequest(limit=limit)  # type: ignore
+    except Exception:
+        req = NewsRequest(symbols=symbols or None, limit=limit)  # type: ignore
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(client.get_news, req)
+        resp = future.result(timeout=15)
+
+    news_list = getattr(resp, "news", None)
+    if news_list is None:
+        news_list = list(getattr(resp, "data", {}).values())
+    elif isinstance(news_list, dict):
+        news_list = list(news_list.values())
+
+    sym_key = ",".join(symbols) if symbols else "general"
+    headlines: List[Dict[str, str]] = []
+    for n in list(news_list)[:limit]:
+        if hasattr(n, "model_dump"):
+            d = n.model_dump()
+        elif hasattr(n, "dict"):
+            d = n.dict()
+        elif isinstance(n, dict):
+            d = n
+        else:
+            d = {"headline": str(n)}
+
+        headline = str(d.get("headline") or d.get("title") or d.get("summary") or "")[:300]
+        raw_symbols = d.get("symbols") or d.get("symbol")
+        if isinstance(raw_symbols, (list, tuple)):
+            symbol_display = ",".join(str(x) for x in raw_symbols) or sym_key
+        else:
+            symbol_display = str(raw_symbols) if raw_symbols else sym_key
+
+        score = _sentiment_score(headline)
+        headlines.append(
+            {
+                "headline": headline,
+                "symbol": symbol_display,
+                "timestamp": str(d.get("created_at") or d.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+                "source": str(d.get("source") or "alpaca"),
+                "sentiment_score": score,
+                "sentiment": _sentiment_label(score),
+            }
+        )
+    print(f"From The Alpaca: {headlines}")
+    return headlines
+
+
+def fetch_news(symbols: Optional[List[str]] = None, limit: int = 20) -> List[Dict[str, str]]:
     """
-    Fetch news headlines. Tries Alpaca NewsClient if configured, else returns
-    deterministic mock headlines so Research agent can run offline.
+    Fetch news headlines from Alpaca's NewsClient, if configured.
 
-    Returns list of {headline, symbol, timestamp, source, sentiment, sentiment_score}
+    Returns a list of dicts: {headline, symbol, timestamp, source, sentiment, sentiment_score}.
+    Returns [] (with a logged reason) if no data source is configured or none returns data —
+    callers should render this as "No data available for this".
     """
-    # Clamp
     try:
         lim = int(limit)
     except (TypeError, ValueError):
         lim = 20
-    if lim < 1:
-        lim = 1
-    lim = min(lim, 100)
+    lim = max(1, min(lim, 100))
 
-    sym_key = ",".join(sorted(s.upper() for s in symbols)) if symbols else "general"
+    norm_symbols = _normalize_symbols(symbols)
+    sym_key = ",".join(norm_symbols) if norm_symbols else "general"
     cache_key = f"{sym_key}:{lim}"
+
     cached = _NEWS_CACHE.get(cache_key)
     if cached is not None:
         return cached[:lim]
 
     headlines: List[Dict[str, str]] = []
-    tried_alpaca = False
-
-    # Try Alpaca NewsClient (requires same paper creds)
     try:
-        from backend.core.config import get_settings
-
-        s = get_settings()
-        key = s.get_key()
-        secret = s.get_secret()
-        if key and secret:
-            tried_alpaca = True
-            from alpaca.data.historical import NewsClient  # type: ignore
-            from alpaca.data.requests import NewsRequest  # type: ignore
-
-            client = NewsClient(api_key=key, secret_key=secret)
-            # NewsRequest expects symbols as comma string or single; handle both list and None
-            try:
-                if symbols:
-                    req = NewsRequest(symbols=",".join(s.upper() for s in symbols), limit=lim)  # type: ignore
-                else:
-                    req = NewsRequest(limit=lim)  # type: ignore
-            except Exception:
-                req = NewsRequest(symbols=symbols or None, limit=lim)  # type: ignore fallback
-            # Timeout per VULN 3 pattern
-            import concurrent.futures
-
-            def _do():
-                return client.get_news(req)
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                resp = ex.submit(_do).result(timeout=15)
-
-            # Normalize — resp.news is list of News objects
-            news_list = getattr(resp, "news", None) or getattr(resp, "data", {}).values() or []
-            if isinstance(news_list, dict):
-                news_list = list(news_list.values())
-            for n in list(news_list)[:lim]:
-                if hasattr(n, "model_dump"):
-                    d = n.model_dump()
-                elif hasattr(n, "dict"):
-                    d = n.dict()
-                elif isinstance(n, dict):
-                    d = n
-                else:
-                    d = {"headline": str(n)}
-                headline = d.get("headline") or d.get("title") or d.get("summary") or ""
-                headlines.append(
-                    {
-                        "headline": str(headline)[:300],
-                        "symbol": str(d.get("symbols") or d.get("symbol") or sym_key),
-                        "timestamp": str(d.get("created_at") or d.get("updated_at") or datetime.now(timezone.utc).isoformat()),
-                        "source": str(d.get("source") or "alpaca"),
-                        "sentiment_score": str(_sentiment_score(str(headline))),
-                    }
-                )
-            if headlines:
-                log_event("news_fetch_alpaca_ok", symbols=sym_key, count=len(headlines))
+        headlines = _fetch_from_alpaca(norm_symbols, lim)
+        if headlines:
+            log_event("news_fetch_alpaca_ok", symbols=sym_key, count=len(headlines))
     except Exception as e:
-        if tried_alpaca:
-            log_event("news_fetch_alpaca_error", level="warning", error=str(e)[:200], symbols=sym_key)
+        log_event("news_fetch_alpaca_error", level="warning", error=str(e)[:200], symbols=sym_key)
 
-    # No mock fallback — if Alpaca returns no data, return empty and let caller handle "No data available"
     if not headlines:
-        log_event("news_no_data", symbols=sym_key, reason="No data available for this symbols/timeframe (Alpaca returned 0 headlines)")
-        # Return empty list — tools and research will output "No data available for this"
+        log_event(
+            "news_no_data",
+            symbols=sym_key,
+            reason="No data available for this symbols/timeframe (Alpaca returned 0 headlines or is unconfigured)",
+        )
         _NEWS_CACHE.set(cache_key, [])
         return []
-
-    # Enrich with string sentiment label
-    for h in headlines:
-        try:
-            score = float(h.get("sentiment_score", 0))
-        except Exception:
-            score = 0
-        if score > 0.2:
-            h["sentiment"] = "bullish"
-        elif score < -0.2:
-            h["sentiment"] = "bearish"
-        else:
-            h["sentiment"] = "neutral"
 
     _NEWS_CACHE.set(cache_key, headlines)
     return headlines[:lim]
 
 
-def get_macro_calendar(days_ahead: int = 7) -> List[Dict[str, str]]:
+# --- Macro calendar --------------------------------------------------------
+#
+# get_macro_calendar returns a dict keyed by source, so callers always know
+# where each event came from instead of a flat list with a buried "source"
+# field:
+#
+#   {
+#       "finnhub": [ {event, time, country, actual, estimate, prev, source}, ... ],
+#       "fred":    [ {event, time, value, series_id, source}, ... ],
+#   }
+#
+# - "finnhub": forward-looking US calendar entries in [now, now + days_ahead].
+# - "fred":    latest confirmed print for CPI/NFP/Unemployment/Fed Funds
+#              (not forward-looking — FRED has no release calendar, only
+#              realized values). Included as context even when Finnhub's
+#              own actual/estimate/prev fields are populated.
+#
+# Either list may be empty (e.g. no events due in the window, or that
+# source isn't configured / failed) — an empty list is a valid, meaningful
+# result and is not treated as an error.
+
+def _parse_event_time(raw: str) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _fetch_macro_finnhub(days_ahead: int) -> List[Dict[str, str]]:
+    """US economic calendar entries scheduled within [now, now + days_ahead]."""
+    settings = get_settings()
+    finnhub_key = os.getenv("FINNHUB_API_KEY") or getattr(settings, "finnhub_api_key", None)
+    if not finnhub_key:
+        return []
+
+    resp = requests.get(
+        "https://finnhub.io/api/v1/calendar/economic",
+        params={"token": finnhub_key},
+        timeout=8,
+    )
+    if not resp.ok:
+        return []
+
+    raw_events = resp.json().get("economicCalendar") or resp.json().get("economic_calendar") or []
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days_ahead)
+
+    events: List[Dict[str, str]] = []
+    for e in raw_events:
+        country = str(e.get("country", "")).upper()
+        if country not in ("US", "USA"):
+            continue
+
+        dt = _parse_event_time(e.get("time") or e.get("date") or "")
+        # Drop events with an unparseable time, and events outside [now, cutoff]
+        if dt is None or dt < now or dt > cutoff:
+            continue
+
+        events.append(
+            {
+                "event": str(e.get("event") or e.get("name") or "Macro"),
+                "time": str(e.get("time") or e.get("date") or ""),
+                "country": "US",
+                "actual": str(e.get("actual") or ""),
+                "estimate": str(e.get("estimate") or ""),
+                "prev": str(e.get("prev") or ""),
+                "source": "finnhub",
+            }
+        )
+    return events[:10]
+
+
+def _fetch_macro_fred() -> List[Dict[str, str]]:
+    """Latest confirmed print for a handful of key US series (not forward-looking)."""
+    settings = get_settings()
+    fred_key = os.getenv("FRED_API_KEY") or getattr(settings, "fred_api_key", None)
+    if not fred_key:
+        return []
+
+    base = str(getattr(settings, "fred_api_url", None) or os.getenv("FRED_API_URL") or "https://api.stlouisfed.org/fred").rstrip("/")
+    series = [("CPIAUCSL", "CPI"), ("PAYEMS", "NFP"), ("UNRATE", "Unemployment"), ("FEDFUNDS", "Fed Funds")]
+
+    events: List[Dict[str, str]] = []
+    for series_id, name in series:
+        try:
+            resp = requests.get(
+                f"{base}/series/observations",
+                params={"series_id": series_id, "api_key": fred_key, "file_type": "json", "limit": 1, "sort_order": "desc"},
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+            obs = (resp.json().get("observations") or [{}])[0]
+            events.append(
+                {
+                    "event": name,
+                    "time": str(obs.get("date") or ""),
+                    "value": str(obs.get("value") or ""),
+                    "series_id": series_id,
+                    "source": "fred",
+                }
+            )
+        except Exception:
+            continue
+    print(f"From The Fred: {events}")
+    return events
+
+
+def get_macro_calendar(days_ahead: int = 7) -> Dict[str, List[Dict[str, str]]]:
     """
-    Return upcoming macro catalysts: Fed speeches, NFP, CPI, earnings, benchmark revisions.
-    Free sources (no paid tier):
-      1) Finnhub economic calendar (US, next 7d) — FINNHUB_API_KEY (free 60/min)
-      2) FRED observations for CPI/NFP (CPIAUCSL, PAYEMS) — FRED_API_KEY (free) or CSV fallback without key
-      3) Zero-key ICS fallback via FRED CSV if no keys set — still returns CPI level for research
-    Caller should handle empty as "No data available for this".
-    Uses library-backed TTLCache (cachetools) via core/utils.
+    Return upcoming/latest US macro catalysts, grouped by source:
+
+        {"finnhub": [...forward-looking calendar events...],
+         "fred":    [...latest confirmed CPI/NFP/Unemployment/Fed Funds prints...]}
+
+    Each source is fetched independently — a failure or empty result in one
+    doesn't affect the other, and both keys are always present. Callers
+    that just want "is there anything at all" can check whether either
+    list is non-empty; callers that care about provenance already have it
+    via the top-level key (and the per-event "source" field, kept for
+    convenience when events are flattened downstream).
     """
-    cached = _MACRO_CACHE.get("macro")
+    try:
+        days = max(0, int(days_ahead))
+    except (TypeError, ValueError):
+        days = 7
+
+    cache_key = f"macro:{days}"
+    cached = _MACRO_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    events: List[Dict[str, str]] = []
+    result: Dict[str, List[Dict[str, str]]] = {"finnhub": [], "fred": []}
 
-    # 1) Finnhub economic calendar (closest to docs: Fed speeches, NFP, CPI)
     try:
-        from backend.core.config import get_settings
-        import os
-        import requests
-
-        s = get_settings()
-        # Use FRED_API_URL base if needed for search, but for calendar use Finnhub
-        finnhub_key = os.getenv("FINNHUB_API_KEY") or getattr(s, "finnhub_api_key", None)
-        if finnhub_key:
-            # Finnhub calendar returns {economicCalendar:[{event,country,time,actual,estimate,prev}]}
-            r = requests.get("https://finnhub.io/api/v1/calendar/economic", params={"token": finnhub_key}, timeout=8)
-            if r.ok:
-                data = r.json()
-                raw = data.get("economicCalendar") or data.get("economic_calendar") or []
-                # Filter US next 7d
-                cutoff = datetime.now(timezone.utc) + timedelta(days=days_ahead)
-                for e in raw:
-                    if str(e.get("country", "")).upper() not in ("US", "USA", ""):
-                        continue
-                    # Parse time
-                    t = e.get("time") or e.get("date") or ""
-                    try:
-                        dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        if dt > cutoff:
-                            continue
-                    except Exception:
-                        pass
-                    events.append(
-                        {
-                            "event": str(e.get("event") or e.get("name") or "Macro"),
-                            "time": str(t),
-                            "country": "US",
-                            "actual": str(e.get("actual") or ""),
-                            "estimate": str(e.get("estimate") or ""),
-                            "prev": str(e.get("prev") or ""),
-                            "source": "finnhub",
-                        }
-                    )
-                if events:
-                    events = events[:10]
-                    _MACRO_CACHE.set("macro", events)
-                    log_event("macro_calendar_finnhub_ok", count=len(events))
-                    return events
+        result["finnhub"] = _fetch_macro_finnhub(days)
+        log_event("macro_calendar_finnhub_ok", count=len(result["finnhub"]))
     except Exception as e:
         log_event("macro_calendar_finnhub_error", level="warning", error=str(e)[:200])
 
-    # 2) FRED observations for CPI/NFP levels (free, no calendar but latest print)
     try:
-        import os
-        import requests
-
-        from backend.core.config import get_settings
-
-        s = get_settings()
-        fred_key = os.getenv("FRED_API_KEY") or getattr(s, "fred_api_key", None)
-        if fred_key:
-            for series_id, name in [("CPIAUCSL", "CPI"), ("PAYEMS", "NFP"), ("UNRATE", "Unemployment"), ("FEDFUNDS", "Fed Funds")]:
-                try:
-                    # Use configurable FRED_API_URL
-                    base = getattr(s, "fred_api_url", None) or os.getenv("FRED_API_URL") or "https://api.stlouisfed.org/fred"
-                    base = str(base).rstrip("/")
-                    r = requests.get(
-                        f"{base}/series/observations",
-                        params={"series_id": series_id, "api_key": fred_key, "file_type": "json", "limit": 1, "sort_order": "desc"},
-                        timeout=8,
-                    )
-                    if r.ok:
-                        obs = (r.json().get("observations") or [{}])[0]
-                        events.append(
-                            {
-                                "event": name,
-                                "time": str(obs.get("date") or ""),
-                                "value": str(obs.get("value") or ""),
-                                "source": "fred",
-                                "series_id": series_id,
-                            }
-                        )
-                except Exception:
-                    continue
-            if events:
-                _MACRO_CACHE.set("macro", events[:10])
-                log_event("macro_calendar_fred_ok", count=len(events))
-                return events[:10]
+        result["fred"] = _fetch_macro_fred()
+        log_event("macro_calendar_fred_ok", count=len(result["fred"]))
     except Exception as e:
         log_event("macro_calendar_fred_error", level="warning", error=str(e)[:200])
 
-    # 3) Zero-key fallback: FRED CSV (no API key, public) for CPI level — 15s timeout (FRED can be slow)
-    try:
-        import os
-        import requests
+    if not result["finnhub"] and not result["fred"]:
+        log_event(
+            "macro_calendar_no_data",
+            reason="No data available for macro calendar (set FRED_API_KEY and/or FINNHUB_API_KEY in .env)",
+        )
 
-        from backend.core.config import get_settings
-
-        _s = get_settings()
-        csv_base = getattr(_s, "fred_csv_url", None) or os.getenv("FRED_CSV_URL") or "https://fred.stlouisfed.org/graph/fredgraph.csv"
-        r = requests.get(csv_base, params={"id": "CPIAUCSL"}, timeout=15, headers={"User-Agent": "meanrev/1.0"})
-        if r.ok and "DATE" in r.text:
-            lines = r.text.strip().splitlines()
-            if len(lines) >= 2:
-                last = lines[-1].split(",")
-                if len(last) >= 2 and last[1] not in (".", ""):
-                    events.append({"event": "CPI", "time": last[0], "value": last[1], "source": "fred_csv"})
-                    _MACRO_CACHE.set("macro", events)
-                    log_event("macro_calendar_fred_csv_ok", count=len(events))
-                    return events
-    except Exception as e:
-        log_event("macro_calendar_fred_csv_error", level="warning", error=str(e)[:200])
-
-    # No free source configured or all failed — return empty with log (research handles as "No data available")
-    log_event("macro_calendar_no_data", reason="No data available for macro calendar (set FRED_API_KEY or FINNHUB_API_KEY in .env for free calendar; zero-key CSV also tried)")
-    _MACRO_CACHE.set("macro", [])
-    return []
+    _MACRO_CACHE.set(cache_key, result)
+    print(f"From The Macro Calendar: {result}")
+    return result
 
 
 def extract_keywords(headlines: List[Dict[str, str]], top_k: int = 10) -> List[str]:
     """
-    Simple NLP keyword extraction — top frequent non-stopwords from headlines.
-    Used for Research agent social velocity / keyword signals.
+    Simple keyword extraction — top frequent non-stopwords across headlines.
+    Used for Research agent social-velocity / keyword signals.
     """
-    stop = {
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "for",
-        "to",
-        "of",
-        "in",
-        "on",
-        "ahead",
-        "could",
-        "market",
-        "fed",
-    }
     freq: Dict[str, int] = {}
     for h in headlines:
-        text = h.get("headline", "")
-        for w in re.findall(r"\w+", text.lower()):
-            if w in stop or len(w) < 3:
+        for w in re.findall(r"\w+", h.get("headline", "").lower()):
+            if len(w) < 3 or w in _STOPWORDS:
                 continue
             freq[w] = freq.get(w, 0) + 1
-    sorted_words = sorted(freq.items(), key=lambda x: x[1], reverse=True)
-    return [w for w, _ in sorted_words[:top_k]]
+
+    return [w for w, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:top_k]]
+
+    

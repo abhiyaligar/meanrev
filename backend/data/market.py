@@ -472,13 +472,19 @@ def get_market_snapshot(symbol: str, timeframes: Optional[List[str]] = None) -> 
     """
     Convenience — fetch OHLCV at multiple timeframes for a symbol.
     Default: 1Day (100 bars) + 1Hour (100 bars) for strategy/research.
+    For crypto (BTC/USD etc.) also includes 1Min (100 bars) since 1Day may be thin (1 row) and 1Hour <14 bars for RSI — 1Min gives valid RSI/MACD.
     Returns dict timeframe -> DataFrame.
     """
     if timeframes is None:
-        timeframes = ["1Day", "1Hour"]
+        if _is_crypto_symbol(symbol):
+            timeframes = ["1Day", "1Hour", "1Min"]
+        else:
+            timeframes = ["1Day", "1Hour"]
     out: Dict[str, pd.DataFrame] = {}
     for tf in timeframes:
-        out[tf] = fetch_ohlcv(symbol, timeframe=tf, limit=100)
+        # Use smaller limit for 1Min to avoid hammering but enough for indicators (need 14 for RSI)
+        lim = 100 if tf != "1Min" else 100
+        out[tf] = fetch_ohlcv(symbol, timeframe=tf, limit=lim)
     return out
 
 

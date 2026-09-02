@@ -69,9 +69,17 @@ def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optiona
     use_thread = thread_id or cfg_thread
     interval = cfg_interval
 
-    # 1. Market hours guard
+    # 1. Market hours guard — skip for crypto (24/7) prompts
     mh = is_market_open()
-    if not mh.get("is_open"):
+    # Crypto trades 24/7 — if prompt explicitly asks for crypto, don't block on equity market closed
+    _is_crypto_prompt = False
+    try:
+        _lower = (use_prompt or "").lower()
+        if "/usd" in _lower or "btc" in _lower or "eth" in _lower or "crypto" in _lower:
+            _is_crypto_prompt = True
+    except Exception:
+        _is_crypto_prompt = False
+    if not mh.get("is_open") and not _is_crypto_prompt:
         nxt = mh.get("next_open") or "unknown"
         log_event("scheduler_skip_closed", level="info", next_open=str(nxt), now_iso=mh.get("now_iso"))
         # Persist next_run as next_open
@@ -80,6 +88,8 @@ def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optiona
         except Exception:
             pass
         return {"skipped": True, "reason": "market_closed", "next_open": str(nxt), "market_hours": mh}
+    elif not mh.get("is_open") and _is_crypto_prompt:
+        log_event("scheduler_crypto_override", level="info", next_open=str(mh.get("next_open")), now_iso=mh.get("now_iso"), prompt_hint=str(use_prompt)[:60])
 
     # 2. Duplicate guard (crash resilience)
     if should_skip_duplicate(interval_min=interval):

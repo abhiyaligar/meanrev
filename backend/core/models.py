@@ -70,3 +70,27 @@ class RiskVerdict(BaseModel):
     rule: Optional[str] = None
     adjusted_qty: Optional[float] = None
     ts: str = Field(default_factory=utc_now_iso)
+
+
+class SchedulerStatusResponse(BaseModel):
+    """Scheduler state + clock for dashboard (strict, read from logs/scheduler.json)."""
+
+    run_count: int = 0
+    last_run: Optional[str] = None
+    next_run: Optional[str] = None
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
+    thread_id: str = "scheduler"
+    interval_min: int = 5
+    updated_at: Optional[str] = None
+    is_open: Optional[bool] = None
+    market_hours: Optional[Dict[str, Any]] = None
+    started_at: Optional[str] = None
+
+
+class DecisionsResponse(BaseModel):
+    """Buffered broker log decisions for dashboard (strict, read from logs/broker.jsonl)."""
+
+    count: int
+    decisions: List[Dict[str, Any]]
+    ts: str = Field(default_factory=utc_now_iso)
