@@ -172,7 +172,6 @@ def _fetch_from_alpaca(symbols: Optional[List[str]], limit: int) -> List[Dict[st
                 "sentiment": _sentiment_label(score),
             }
         )
-    print(f"From The Alpaca: {headlines}")
     return headlines
 
 
@@ -328,7 +327,6 @@ def _fetch_macro_fred() -> List[Dict[str, str]]:
             )
         except Exception:
             continue
-    print(f"From The Fred: {events}")
     return events
 
 
@@ -377,7 +375,6 @@ def get_macro_calendar(days_ahead: int = 7) -> Dict[str, List[Dict[str, str]]]:
         )
 
     _MACRO_CACHE.set(cache_key, result)
-    print(f"From The Macro Calendar: {result}")
     return result
 
 

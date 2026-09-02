@@ -16,6 +16,7 @@ from backend.core.logging import log_event
 from backend.core.system_prompt import GRAPH_RESEARCH_PROMPT, RESEARCH_SYSTEM_PROMPT
 from backend.core.utils import count_tokens, enforce_token_limit, get_model_id, handle_tool_errors
 from backend.tools.alpaca_cli_tool import alpaca_cli_account, alpaca_cli_clock, alpaca_cli_orders, alpaca_cli_positions
+from backend.tools.exa_tools import exa_get_contents, exa_search, exa_search_news
 from backend.tools.fred_tools import search_fred_series
 from backend.tools.mcp_tools import mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
 from backend.tools.news_tools import extract_keywords, fetch_news, get_macro_calendar
@@ -36,11 +37,16 @@ class ResearchOutput(BaseModel):
 # Phase 12: Alpaca CLI + MCP Server tools wired into research agent (satisfies hackathon bonus)
 # Research can now read account/positions via CLI or MCP, besides news/macro
 # + FRED search for free macro series discovery (e.g. search_fred_series("canada"))
+# + Exa Web Search for public perception (exa_search_news, exa_search, exa_get_contents) per https://exa.ai/docs/reference/search-api-guide-for-coding-agents
 _RESEARCH_TOOLS = [
     fetch_news,
     get_macro_calendar,
     extract_keywords,
     search_fred_series,
+    # Exa Web Search — web/public perception via highlights:true (token efficient), news category for recent
+    exa_search,
+    exa_search_news,
+    exa_get_contents,
     # Phase 12 — Alpaca CLI (subprocess "alpaca") with broker fallback
     alpaca_cli_account,
     alpaca_cli_positions,

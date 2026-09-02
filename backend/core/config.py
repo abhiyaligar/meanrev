@@ -18,7 +18,7 @@ Usage:
 
 import os
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -88,7 +88,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED", description="Enable autonomous scheduler loop (tick every interval when market open)")
     scheduler_interval_min: int = Field(default=5, alias="SCHEDULER_INTERVAL_MIN", description="Scheduler tick interval minutes (1..60, default 5)")
     scheduler_thread_id: str = Field(default="scheduler", alias="SCHEDULER_THREAD_ID", description="LangGraph thread_id for scheduler ticks (prior_regime continuity)")
-    scheduler_prompt: str = Field(default="Do Research On BTC/USD And Propose a Order", alias="SCHEDULER_PROMPT", description="Prompt for scheduler ticks")
+    # Prompt is derived strictly from SCHEDULER_SYMBOLS (single source, no hardcoded symbols). SCHEDULER_PROMPT legacy override still supported but symbols win.
+    scheduler_prompt: str = Field(default="", alias="SCHEDULER_PROMPT", description="Legacy prompt override for scheduler_ticks; prefer SCHEDULER_SYMBOLS (strict from env)")
+    scheduler_symbols: str = Field(default="BTC/USD", alias="SCHEDULER_SYMBOLS", description="Comma-separated symbols for scheduler ticks — STRICTLY from env, e.g. BTC/USD,ETH/USD,AAPL (compulsory, see .env.example). No hardcoded symbols in code.")
 
     # --- Macro data (free) — FRED + Finnhub + BLS (optional, no paid tier) ---
     fred_api_key: Optional[str] = Field(default=None, alias="FRED_API_KEY", description="FRED API key (free at https://fred.stlouisfed.org/docs/api/api_key.html) for CPI, NFP, etc.")
@@ -96,6 +98,12 @@ class Settings(BaseSettings):
     fred_csv_url: str = Field(default="https://fred.stlouisfed.org/graph/fredgraph.csv", alias="FRED_CSV_URL", description="FRED CSV fallback URL (no auth)")
     finnhub_api_key: Optional[str] = Field(default=None, alias="FINNHUB_API_KEY", description="Finnhub API key (free at https://finnhub.io) for economic calendar")
     bls_api_key: Optional[str] = Field(default=None, alias="BLS_API_KEY", description="BLS API key (optional, https://api.bls.gov)")
+
+    # --- Web Search — Exa (free tier, https://dashboard.exa.ai/api-keys) ---
+    exa_api_key: Optional[str] = Field(default=None, alias="EXA_API_KEY", description="Exa API key for web search (free at https://dashboard.exa.ai/api-keys)")
+    exa_base_url: str = Field(default="https://api.exa.ai", alias="EXA_BASE_URL", description="Exa API base URL")
+    exa_default_type: str = Field(default="auto", alias="EXA_DEFAULT_TYPE", description="Exa search type: auto|fast|instant|deep-lite|deep|deep-reasoning")
+    exa_default_num: int = Field(default=5, alias="EXA_DEFAULT_NUM", description="Default numResults 1..100")
 
     # --- Optional infra ---
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
@@ -197,6 +205,66 @@ class Settings(BaseSettings):
             has_proxy = bool(cfg.get("proxy_token") and cfg.get("endpoint_url"))
             return has_tokens or has_proxy
         return False
+
+    def is_exa_configured(self) -> bool:
+        """True if EXA_API_KEY present (for web search)."""
+        import os as _os
+
+        return bool((self.exa_api_key or _os.getenv("EXA_API_KEY") or "").strip())
+
+    def exa_config(self) -> dict:
+        """Return Exa config dict for tools (api_key, base_url, defaults)."""
+        import os as _os
+
+        return {
+            "api_key": self.exa_api_key or _os.getenv("EXA_API_KEY"),
+            "base_url": (self.exa_base_url or _os.getenv("EXA_BASE_URL") or "https://api.exa.ai").rstrip("/"),
+            "default_type": self.exa_default_type or _os.getenv("EXA_DEFAULT_TYPE") or "auto",
+            "default_num": int(self.exa_default_num or _os.getenv("EXA_DEFAULT_NUM") or 5),
+        }
+
+    def get_scheduler_symbols(self) -> List[str]:
+        """Strictly from env SCHEDULER_SYMBOLS — single source, no hardcoded symbols in agents. Returns normalized list e.g. ['BTC/USD','ETH/USD']."""
+        import os as _os
+
+        raw = (self.scheduler_symbols or _os.getenv("SCHEDULER_SYMBOLS") or "").strip()
+        if not raw:
+            # Fallback to prompt parsing for legacy, but symbols remain strict — require .env set
+            legacy = (self.scheduler_prompt or _os.getenv("SCHEDULER_PROMPT") or "").strip()
+            if legacy:
+                # Extract symbols like BTC/USD from legacy prompt if present (backward compat)
+                import re
+
+                found = re.findall(r"[A-Z]{2,}/[A-Z]{2,}|[A-Z]{1,5}", legacy)
+                # Filter plausible symbols (keep /USD pairs + equities)
+                filtered = [s.upper() for s in found if "/" in s or s in ("BTC", "ETH", "SOL", "AAPL", "SPY", "QQQ", "NVDA")]
+                if filtered:
+                    return filtered[:10]
+            return []
+        parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
+        # Normalize crypto pairs: BTC -> BTC/USD if no slash and known crypto base
+        normalized: List[str] = []
+        for p in parts:
+            if "/" not in p and p in ("BTC", "ETH", "SOL", "AVAX", "MATIC"):
+                normalized.append(f"{p}/USD")
+            else:
+                normalized.append(p)
+        return normalized[:20]
+
+    def get_scheduler_prompt(self) -> str:
+        """Build scheduler prompt STRICTLY from SCHEDULER_SYMBOLS env — no hardcoded symbols. Legacy SCHEDULER_PROMPT overrides only if symbols empty."""
+        import os as _os
+
+        symbols = self.get_scheduler_symbols()
+        if symbols:
+            joined = ", ".join(symbols)
+            return f"Do Research On {joined} And Propose a Order"
+        # Strict fallback: use SCHEDULER_PROMPT from env if set
+        prompt = (self.scheduler_prompt or _os.getenv("SCHEDULER_PROMPT") or "").strip()
+        if prompt:
+            return prompt
+        # Last resort (should not happen if .env.example set) — raise for strictness in prod, but return safe for tests
+        return "Do Research On BTC/USD And Propose a Order"
 
 
 @lru_cache

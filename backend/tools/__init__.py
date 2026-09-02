@@ -18,12 +18,13 @@ from .broker_tools import (
     set_stop_loss,
     submit_order,
 )
+from .exa_tools import EXA_TOOLS, exa_get_contents, exa_search, exa_search_news
 from .market_tools import align_timeframes_tool, detect_arbitrage, get_market_snapshot, get_ohlcv, get_option_chain
 from .mcp_tools import MCP_TOOLS, mcp_get_account, mcp_get_clock, mcp_get_orders, mcp_get_positions
 from .news_tools import extract_keywords, fetch_news, get_macro_calendar
 from .option_tools import get_option_chain_docs, get_option_contracts, place_option_order
 
-# Flat list for create_agent(tools=TOOLS) — 27 total (25 + 2 option docs-correct)
+# Flat list for create_agent(tools=TOOLS) — 30 total (27 + 3 Exa web search)
 TOOLS = [
     get_account,
     get_positions,
@@ -54,6 +55,10 @@ TOOLS = [
     # Docs-correct options (per https://docs.alpaca.markets/us/docs/options-trading) — NOT OPRA historical
     get_option_contracts,
     place_option_order,
+    # Exa Web Search — public perception + web context (highlights:true for agents, https://exa.ai/docs/reference/search-api-guide-for-coding-agents)
+    exa_search,
+    exa_search_news,
+    exa_get_contents,
 ]
 
 # Sub-groupings for per-agent wiring
@@ -65,6 +70,7 @@ NEWS_TOOLS = [fetch_news, get_macro_calendar, extract_keywords]
 ALPACA_CLI_TOOLS = ALPACA_CLI_TOOLS
 MCP_TOOLS = MCP_TOOLS
 OPTION_TOOLS = [get_option_contracts, place_option_order, get_option_chain_docs]
+EXA_TOOLS = EXA_TOOLS
 
 __all__ = [
     "TOOLS",
@@ -75,6 +81,7 @@ __all__ = [
     "ALPACA_CLI_TOOLS",
     "MCP_TOOLS",
     "OPTION_TOOLS",
+    "EXA_TOOLS",
     "get_account",
     "get_positions",
     "get_orders",
@@ -103,4 +110,7 @@ __all__ = [
     "get_option_contracts",
     "place_option_order",
     "get_option_chain_docs",
+    "exa_search",
+    "exa_search_news",
+    "exa_get_contents",
 ]

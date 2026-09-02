@@ -31,20 +31,46 @@ try:
     _settings = get_settings()
     SCHEDULER_INTERVAL_MIN = int(getattr(_settings, "scheduler_interval_min", 5) or 5)
     SCHEDULER_THREAD_ID = str(getattr(_settings, "scheduler_thread_id", "scheduler") or "scheduler")
-    SCHEDULER_PROMPT = str(getattr(_settings, "scheduler_prompt", "Do Research On BTC/USD And Propose a Order") or "Do Research On BTC/USD And Propose a Order")
+    # Strict: prompt derived from SCHEDULER_SYMBOLS env via config helper — no hardcoded symbols
+    try:
+        SCHEDULER_PROMPT = _settings.get_scheduler_prompt()  # type: ignore[attr-defined]
+    except Exception:
+        SCHEDULER_PROMPT = str(getattr(_settings, "scheduler_prompt", "") or "").strip() or "Do Research On BTC/USD And Propose a Order"
+    try:
+        _syms = _settings.get_scheduler_symbols()  # type: ignore[attr-defined]
+        SCHEDULER_SYMBOLS = ",".join(_syms) if _syms else str(getattr(_settings, "scheduler_symbols", "") or "").strip()
+    except Exception:
+        SCHEDULER_SYMBOLS = str(getattr(_settings, "scheduler_symbols", "") or "").strip()
 except Exception:
+    import os as _os
+
     SCHEDULER_INTERVAL_MIN = 5
     SCHEDULER_THREAD_ID = "scheduler"
-    SCHEDULER_PROMPT = "Do Research On BTC/USD And Propose a Order"
+    # Strict fallback: read strictly from env, no hardcoded except last resort for tests
+    _sym_env = (_os.getenv("SCHEDULER_SYMBOLS") or "").strip()
+    _prompt_env = (_os.getenv("SCHEDULER_PROMPT") or "").strip()
+    if _sym_env:
+        SCHEDULER_SYMBOLS = _sym_env
+        SCHEDULER_PROMPT = f"Do Research On {_sym_env} And Propose a Order"
+    elif _prompt_env:
+        SCHEDULER_SYMBOLS = ""
+        SCHEDULER_PROMPT = _prompt_env
+    else:
+        SCHEDULER_SYMBOLS = "BTC/USD"
+        SCHEDULER_PROMPT = "Do Research On BTC/USD And Propose a Order"
 
 
 def _resolve_prompt_and_thread(dry_run: bool = False) -> tuple[str, str, int]:
-    """Resolve prompt, thread_id, interval from config (live) with env overrides."""
+    """Resolve prompt, thread_id, interval from config (live) STRICTLY via SCHEDULER_SYMBOLS env."""
     try:
         from backend.core.config import get_settings
 
         s = get_settings()
-        prompt = str(getattr(s, "scheduler_prompt", SCHEDULER_PROMPT) or SCHEDULER_PROMPT)
+        # Strict: prompt derived from symbols env, not hardcoded
+        try:
+            prompt = s.get_scheduler_prompt()  # type: ignore[attr-defined]
+        except Exception:
+            prompt = str(getattr(s, "scheduler_prompt", SCHEDULER_PROMPT) or SCHEDULER_PROMPT)
         thread_id = str(getattr(s, "scheduler_thread_id", SCHEDULER_THREAD_ID) or SCHEDULER_THREAD_ID)
         interval = int(getattr(s, "scheduler_interval_min", SCHEDULER_INTERVAL_MIN) or SCHEDULER_INTERVAL_MIN)
         # Clamp interval 1..60
@@ -52,6 +78,26 @@ def _resolve_prompt_and_thread(dry_run: bool = False) -> tuple[str, str, int]:
         return prompt, thread_id, interval
     except Exception:
         return SCHEDULER_PROMPT, SCHEDULER_THREAD_ID, SCHEDULER_INTERVAL_MIN
+
+
+def _get_scheduler_symbols_strict() -> str:
+    """Return comma symbols strictly from env via config (for crypto guard + prompt). No hardcoded fallback unless env missing."""
+    try:
+        from backend.core.config import get_settings
+
+        s = get_settings()
+        syms = s.get_scheduler_symbols()  # type: ignore[attr-defined]
+        if syms:
+            return ",".join(syms)
+        # fallback to raw field
+        raw = str(getattr(s, "scheduler_symbols", "") or "").strip()
+        if raw:
+            return raw
+    except Exception:
+        pass
+    import os as _os
+
+    return (_os.getenv("SCHEDULER_SYMBOLS") or SCHEDULER_SYMBOLS or "").strip()
 
 
 def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optional[str] = None) -> Dict[str, Any]:
@@ -69,13 +115,17 @@ def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optiona
     use_thread = thread_id or cfg_thread
     interval = cfg_interval
 
-    # 1. Market hours guard — skip for crypto (24/7) prompts
+    # 1. Market hours guard — skip for crypto (24/7) symbols STRICTLY from SCHEDULER_SYMBOLS env
     mh = is_market_open()
-    # Crypto trades 24/7 — if prompt explicitly asks for crypto, don't block on equity market closed
+    _symbols_strict = _get_scheduler_symbols_strict()
     _is_crypto_prompt = False
     try:
         _lower = (use_prompt or "").lower()
-        if "/usd" in _lower or "btc" in _lower or "eth" in _lower or "crypto" in _lower:
+        _sym_lower = _symbols_strict.lower()
+        # Strict: check symbols env first (e.g. BTC/USD,ETH/USD), then prompt fallback
+        if "/usd" in _sym_lower or "btc" in _sym_lower or "eth" in _sym_lower:
+            _is_crypto_prompt = True
+        elif "/usd" in _lower or "btc" in _lower or "eth" in _lower or "crypto" in _lower:
             _is_crypto_prompt = True
     except Exception:
         _is_crypto_prompt = False
@@ -89,7 +139,7 @@ def tick(dry_run: bool = False, thread_id: Optional[str] = None, prompt: Optiona
             pass
         return {"skipped": True, "reason": "market_closed", "next_open": str(nxt), "market_hours": mh}
     elif not mh.get("is_open") and _is_crypto_prompt:
-        log_event("scheduler_crypto_override", level="info", next_open=str(mh.get("next_open")), now_iso=mh.get("now_iso"), prompt_hint=str(use_prompt)[:60])
+        log_event("scheduler_crypto_override", level="info", next_open=str(mh.get("next_open")), now_iso=mh.get("now_iso"), prompt_hint=str(use_prompt)[:60], symbols=_symbols_strict[:60])
 
     # 2. Duplicate guard (crash resilience)
     if should_skip_duplicate(interval_min=interval):
@@ -254,9 +304,24 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Dry-run: no live orders, only logs")
     parser.add_argument("--once", action="store_true", help="Run single tick then exit (for tests)")
     parser.add_argument("--thread-id", type=str, default=None, help="Override SCHEDULER_THREAD_ID")
-    parser.add_argument("--prompt", type=str, default=None, help="Override SCHEDULER_PROMPT")
+    parser.add_argument("--prompt", type=str, default=None, help="Override SCHEDULER_PROMPT (legacy, prefer --symbols)")
+    parser.add_argument("--symbols", type=str, default=None, help="Override SCHEDULER_SYMBOLS strictly, e.g. BTC/USD,ETH/USD,AAPL (strict from env)")
     args = parser.parse_args()
-    run_scheduler(dry_run=args.dry_run, once=args.once, thread_id=args.thread_id, prompt=args.prompt)
+    # Strict symbols override: build prompt from symbols if provided
+    _prompt_override = args.prompt
+    if args.symbols and args.symbols.strip():
+        _prompt_override = f"Do Research On {args.symbols.strip()} And Propose a Order"
+        # Also set env for this process so crypto guard sees strict symbols
+        import os as _os
+
+        _os.environ["SCHEDULER_SYMBOLS"] = args.symbols.strip()
+        try:
+            from backend.core.config import get_settings
+
+            get_settings.cache_clear()
+        except Exception:
+            pass
+    run_scheduler(dry_run=args.dry_run, once=args.once, thread_id=args.thread_id, prompt=_prompt_override)
 
 
 if __name__ == "__main__":
