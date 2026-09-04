@@ -46,10 +46,20 @@ except Exception:
 
     SCHEDULER_INTERVAL_MIN = 5
     SCHEDULER_THREAD_ID = "scheduler"
-    # Strict fallback: read strictly from env, no hardcoded except last resort for tests
+    # Option B fallback: honor SCHEDULER_PROMPT from .env when explicitly set (with placeholder substitution)
     _sym_env = (_os.getenv("SCHEDULER_SYMBOLS") or "").strip()
     _prompt_env = (_os.getenv("SCHEDULER_PROMPT") or "").strip()
-    if _sym_env:
+    # Strip surrounding quotes for consistency with config.py
+    if len(_prompt_env) >= 2 and ((_prompt_env[0] == '"' and _prompt_env[-1] == '"') or (_prompt_env[0] == "'" and _prompt_env[-1] == "'")):
+        _prompt_env = _prompt_env[1:-1].strip()
+    if _prompt_env and _prompt_env != "Do Research On BTC/USD And Propose a Order":
+        SCHEDULER_SYMBOLS = _sym_env or "BTC/USD"
+        if "{SCHEDULER_SYMBOLS}" in _prompt_env or "{symbols}" in _prompt_env:
+            _joined = ", ".join([p.strip().upper() for p in _sym_env.split(",") if p.strip()]) if _sym_env else "BTC/USD"
+            SCHEDULER_PROMPT = _prompt_env.replace("{SCHEDULER_SYMBOLS}", _joined).replace("{symbols}", _joined)
+        else:
+            SCHEDULER_PROMPT = _prompt_env
+    elif _sym_env:
         SCHEDULER_SYMBOLS = _sym_env
         SCHEDULER_PROMPT = f"Do Research On {_sym_env} And Propose a Order"
     elif _prompt_env:

@@ -28,6 +28,10 @@ def _mcp_invoke(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     The research agent's async path can await aget_mcp_tools for true MCP calls.
     """
     if not is_mcp_configured():
+        try:
+            log_event("mcp_not_configured", level="info", tool=tool_name, status="fallback")
+        except Exception:
+            pass
         return {"ok": False, "fallback": True, "reason": "mcp_not_configured"}
     # In v1, sync path always delegates to broker but logs MCP attempt for audit trail
     log_event("mcp_sync_attempt", tool=tool_name, args=list(arguments.keys()), note="sync MCP falls back to broker; async path uses real MCP")
@@ -42,13 +46,24 @@ def mcp_get_account() -> str:
     """
     mcp = _mcp_invoke("get_account", {})
     if mcp.get("ok"):
+        try:
+            log_event("mcp_get_account", level="info", source="mcp", connected=True, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "mcp", "connected": True, "account": mcp["data"]}, default=str)
     try:
         data = broker_client.get_account()
         if not data:
+            log_event("mcp_get_account", level="warning", source="mcp_fallback", connected=False, error="No data available", mcp_reason=str(mcp.get("reason") or "")[:100], status="empty")
             return json.dumps({"source": "mcp_fallback", "connected": False, "error": "No data available for account via MCP and broker fallback — check ALPACA_API_KEY/SECRET", "mcp": mcp_server_info()}, default=str)
+        try:
+            pv = float(data.get("portfolio_value") or data.get("equity") or 0) if isinstance(data, dict) else 0
+            log_event("mcp_get_account", level="info", source="mcp_fallback", connected=True, portfolio_value=pv, mcp_reason=str(mcp.get("reason") or "")[:100], status="ok")
+        except Exception:
+            log_event("mcp_get_account", level="info", source="mcp_fallback", connected=True, status="ok")
         return json.dumps({"source": "mcp_fallback", "connected": True, "account": data, "mcp": mcp_server_info(), "mcp_reason": mcp.get("reason")}, default=str)
     except Exception as e:
+        log_event("mcp_get_account", level="warning", source="mcp_fallback", error=str(e)[:200], status="error")
         return json.dumps({"source": "mcp_fallback", "connected": False, "error": str(e), "type": type(e).__name__, "mcp": mcp_server_info()}, default=str)
 
 
@@ -63,13 +78,23 @@ def mcp_get_positions(symbol: str = "") -> str:
     if mcp.get("ok"):
         data = mcp["data"]
         positions = data if isinstance(data, list) else ([data] if isinstance(data, dict) and data else [])
+        try:
+            log_event("mcp_get_positions", level="info", source="mcp", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "mcp", "count": len(positions), "positions": positions}, default=str)
     try:
         positions = broker_client.get_positions(symbol=sym)
         if positions is None:
             positions = []
+        try:
+            symbols = [str(p.get("symbol", "")) for p in positions[:20]] if isinstance(positions, list) else []
+            log_event("mcp_get_positions", level="info", source="mcp_fallback", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, symbols=symbols, mcp_reason=str(mcp.get("reason") or "")[:100], status="ok")
+        except Exception:
+            log_event("mcp_get_positions", level="info", source="mcp_fallback", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, status="ok")
         return json.dumps({"source": "mcp_fallback", "count": len(positions), "positions": positions, "mcp": mcp_server_info(), "mcp_reason": mcp.get("reason")}, default=str)
     except Exception as e:
+        log_event("mcp_get_positions", level="warning", source="mcp_fallback", symbol=sym or "all", error=str(e)[:200], status="error")
         return json.dumps({"source": "mcp_fallback", "error": str(e), "type": type(e).__name__, "mcp": mcp_server_info()}, default=str)
 
 
@@ -87,14 +112,23 @@ def mcp_get_orders(status: str = "open", limit: int = 50, symbols: str = "") -> 
     if mcp.get("ok"):
         data = mcp["data"]
         orders = data if isinstance(data, list) else ([data] if isinstance(data, dict) and data else [])
+        try:
+            log_event("mcp_get_orders", level="info", source="mcp", status=status_norm, limit=lim, symbols=symbols or "all", count=len(orders) if isinstance(orders, list) else 0)
+        except Exception:
+            pass
         return json.dumps({"source": "mcp", "count": len(orders), "orders": orders, "status": status_norm, "limit": lim}, default=str)
     try:
         syms = symbols.strip() if symbols and symbols.strip() else None
         orders = broker_client.get_orders(status=status_norm, limit=lim, symbols=syms)
         if orders is None:
             orders = []
+        try:
+            log_event("mcp_get_orders", level="info", source="mcp_fallback", order_status=status_norm, limit=lim, symbols=symbols or "all", count=len(orders) if isinstance(orders, list) else 0, mcp_reason=str(mcp.get("reason") or "")[:100], status="ok")
+        except Exception:
+            log_event("mcp_get_orders", level="info", source="mcp_fallback", order_status=status_norm, count=len(orders) if isinstance(orders, list) else 0, status="ok")
         return json.dumps({"source": "mcp_fallback", "count": len(orders), "orders": orders, "status": status_norm, "limit": lim, "mcp": mcp_server_info(), "mcp_reason": mcp.get("reason")}, default=str)
     except Exception as e:
+        log_event("mcp_get_orders", level="warning", source="mcp_fallback", order_status=status_norm, error=str(e)[:200], status="error")
         return json.dumps({"source": "mcp_fallback", "error": str(e), "type": type(e).__name__, "mcp": mcp_server_info()}, default=str)
 
 
@@ -108,12 +142,21 @@ def mcp_get_clock() -> str:
     if mcp.get("ok"):
         data = mcp["data"]
         is_open = bool(data.get("is_open") or data.get("isOpen")) if isinstance(data, dict) else False
+        try:
+            log_event("mcp_get_clock", level="info", source="mcp", is_open=is_open, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "mcp", "is_open": is_open, "clock": data}, default=str)
     try:
         clock = broker_client.get_clock()
         is_open = bool(clock.get("is_open", False)) if isinstance(clock, dict) else False
+        try:
+            log_event("mcp_get_clock", level="info", source="mcp_fallback", is_open=is_open, mcp_reason=str(mcp.get("reason") or "")[:100], status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "mcp_fallback", "is_open": is_open, "clock": clock, "mcp": mcp_server_info(), "mcp_reason": mcp.get("reason")}, default=str)
     except Exception as e:
+        log_event("mcp_get_clock", level="warning", source="mcp_fallback", error=str(e)[:200], status="error")
         return json.dumps({"source": "mcp_fallback", "error": str(e), "type": type(e).__name__, "mcp": mcp_server_info()}, default=str)
 
 

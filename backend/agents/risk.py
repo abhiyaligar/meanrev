@@ -232,6 +232,343 @@ def _set_paused(triggered: bool, reason: str = "") -> None:
             log_event("circuit_breaker_resumed", reason=reason)
 
 
+def _to_float(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_account_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Shared account-state loader used by both single-trade and paired-trade evaluation,
+    so the two paths never diverge on how equity/cash/peak are derived.
+    """
+    account_state = state.get("account_state")
+    if account_state:
+        return account_state
+    try:
+        from backend.broker.client import get_account, get_positions
+
+        acct = get_account()
+        positions = get_positions()
+        return track_account_state(acct, positions)
+    except Exception as e:
+        log_event("risk_account_fetch_failed", level="warning", error=str(e)[:200])
+        return {"equity": 100000, "cash": 100000, "peak_equity": 100000, "unrealized_pl": 0, "realized_pl": 0, "margin_usage": 0}
+
+
+def _load_positions() -> List[Dict[str, Any]]:
+    """Fetch current positions, tolerating broker/client failures."""
+    try:
+        from backend.broker.client import get_positions
+
+        return get_positions() or []
+    except Exception:
+        return []
+
+
+def _existing_exposure(positions: List[Dict[str, Any]]) -> float:
+    """Sum abs(market_value) across positions — matches the pre-existing single-trade logic."""
+    exposure = 0.0
+    for p in positions:
+        try:
+            exposure += abs(float(p.get("market_value") or 0))
+        except Exception:
+            pass
+    return exposure
+
+
+def _find_position(positions: List[Dict[str, Any]], symbol: str) -> Optional[Dict[str, Any]]:
+    """Find a held position by normalized symbol match."""
+    norm = normalize_symbol(symbol) or symbol.upper()
+    for p in positions:
+        p_sym = normalize_symbol(str(p.get("symbol", ""))) or str(p.get("symbol", "")).upper()
+        if p_sym == norm:
+            return p
+    return None
+
+
+def _resolve_price(symbol: str, leg: Dict[str, Any], state: Dict[str, Any]) -> float:
+    """
+    Resolve a price for a leg — mirrors the single-trade price resolution order:
+    leg-provided price -> market_snapshot -> live fetch_ohlcv -> fallback 100.0.
+    """
+    price = leg.get("price") or leg.get("limit_price") or leg.get("entry_price")
+    if price is not None:
+        try:
+            return float(price)
+        except (TypeError, ValueError):
+            pass
+
+    market_snapshot = state.get("market_snapshot")
+    if market_snapshot and isinstance(market_snapshot, dict):
+        for tf_data in market_snapshot.values():
+            if isinstance(tf_data, list) and tf_data:
+                for bar in tf_data:
+                    if str(bar.get("symbol", "")).upper() == symbol and bar.get("close"):
+                        try:
+                            return float(bar["close"])
+                        except Exception:
+                            pass
+            elif isinstance(tf_data, dict) and tf_data.get("close"):
+                try:
+                    return float(tf_data["close"])
+                except Exception:
+                    pass
+
+    try:
+        from backend.data.market import fetch_ohlcv
+
+        df = fetch_ohlcv(symbol, timeframe="1Day", limit=1)
+        if not df.empty and "close" in df.columns and not df["close"].isna().all():
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+
+    log_event("risk_price_fallback", symbol=symbol, price=100.0)
+    return 100.0
+
+
+def _parse_strategy_payload(strategy: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize the raw strategy dict, including the string-output fallback case.
+    Fixes the prior regex-based fallback: paired_trade/arb payloads are nested JSON
+    (close_leg/open_leg are objects), and a single flat `\\{[^}]+\\}` regex cannot
+    capture nested braces — it will silently mis-parse or drop those keys. Try a full
+    json.loads() first; only fall back to the flat-regex extraction for legacy
+    single-level outputs that aren't valid JSON as-is.
+    """
+    if strategy.get("paired_trade") or strategy.get("arb") is not None or strategy.get("action"):
+        return strategy
+
+    output = strategy.get("output")
+    if not isinstance(output, str):
+        return strategy
+
+    import json
+
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, dict):
+            merged = dict(strategy)
+            merged.update(parsed)
+            return merged
+    except Exception:
+        pass
+
+    # Legacy fallback: flat single-level JSON only (no nested objects).
+    try:
+        import re
+
+        m = re.search(r"\{[^{}]+\}", output)
+        if m:
+            parsed = json.loads(m.group(0))
+            merged = dict(strategy)
+            merged.update(parsed)
+            return merged
+    except Exception:
+        pass
+
+    return strategy
+
+
+def evaluate_paired_trade(state: Dict[str, Any], strategy: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Evaluate a {paired_trade: true, close_leg, open_leg, rationale} proposal per
+    STRATEGY_SYSTEM_PROMPT's Capital Reallocation contract:
+    - close_leg is validated against the actual held position (not the position/exposure caps —
+      reducing exposure is never itself capped).
+    - open_leg is checked against equity/exposure state AS IT WOULD EXIST AFTER close_leg fills,
+      not current state — otherwise a valid reallocation gets rejected the same way a lone buy did.
+    - Returns the paired decision shape: close_leg_decision / open_leg_decision / sequencing.
+    """
+    close_leg = strategy.get("close_leg") or {}
+    open_leg = strategy.get("open_leg") or {}
+
+    close_symbol_raw = close_leg.get("symbol")
+    open_symbol_raw = open_leg.get("symbol")
+    if not close_symbol_raw or not open_symbol_raw:
+        return {
+            "paired_trade": True,
+            "close_leg_decision": {"decision": "reject", "original": close_leg, "reason": "close_leg missing symbol"},
+            "open_leg_decision": {"decision": "reject", "original": open_leg, "reason": "open_leg missing symbol"},
+            "sequencing": "close_then_open",
+            "circuit_breaker_active": _is_paused(),
+        }
+
+    close_symbol = normalize_symbol(str(close_symbol_raw)) or str(close_symbol_raw).upper()
+    open_symbol = normalize_symbol(str(open_symbol_raw)) or str(open_symbol_raw).upper()
+
+    account_state = _load_account_state(state)
+    equity = _to_float(account_state.get("equity") or account_state.get("portfolio_value"))
+    peak = _to_float(account_state.get("peak_equity"), equity)
+
+    # Drawdown gates the whole pair, same as a single proposal.
+    triggered, drawdown, drawdown_msg = check_drawdown(equity, peak)
+    if triggered:
+        _set_paused(True, reason=drawdown_msg)
+        log_event("risk_rejected_drawdown_paired", drawdown=drawdown, equity=equity, peak=peak, rule=drawdown_msg)
+        rejected = {"decision": "reject", "reason": drawdown_msg}
+        return {
+            "paired_trade": True,
+            "close_leg_decision": {**rejected, "original": close_leg},
+            "open_leg_decision": {**rejected, "original": open_leg},
+            "sequencing": "close_then_open",
+            "circuit_breaker_active": True,
+        }
+
+    positions = _load_positions()
+    existing_exposure = _existing_exposure(positions)
+
+    # --- close_leg: validate against the actual held position ---
+    # Fix PG weekend bug: never use _resolve_price() fallback (100.0) for close_leg freed_notional — broker's held_market_value is live even when 1Day is empty
+    held = _find_position(positions, close_symbol)
+    requested_close_qty = close_leg.get("qty")
+    requested_close_notional = close_leg.get("notional")
+
+    if held is None:
+        close_decision = {
+            "decision": "reject",
+            "original": close_leg,
+            "reason": f"close_leg symbol {close_symbol} not found in current positions — cannot close what isn't held",
+        }
+        log_event("risk_rejected_paired_close_no_position", symbol=close_symbol)
+        return {
+            "paired_trade": True,
+            "close_leg_decision": close_decision,
+            "open_leg_decision": {"decision": "reject", "original": open_leg, "reason": "close_leg invalid — open_leg not evaluated, funding is not confirmed"},
+            "sequencing": "close_then_open",
+            "circuit_breaker_active": False,
+        }
+
+    held_qty = _to_float(held.get("qty") or held.get("quantity"))
+    held_market_value = abs(_to_float(held.get("market_value")))
+
+    # Resolve requested close qty/notional against what's actually held; cap to held size.
+    # freed_notional is derived proportionally from held_market_value (broker live) not from a fetched price that may fallback to 100.0
+    if requested_close_qty is not None:
+        req_qty = abs(_to_float(requested_close_qty))
+        if req_qty > abs(held_qty) + 1e-9:
+            close_decision = {
+                "decision": "reject",
+                "original": close_leg,
+                "reason": f"close_leg qty {req_qty} exceeds held qty {abs(held_qty):.6f} for {close_symbol}",
+            }
+            log_event("risk_rejected_paired_close_qty", symbol=close_symbol, requested=req_qty, held=held_qty)
+            return {
+                "paired_trade": True,
+                "close_leg_decision": close_decision,
+                "open_leg_decision": {"decision": "reject", "original": open_leg, "reason": "close_leg invalid — open_leg not evaluated, funding is not confirmed"},
+                "sequencing": "close_then_open",
+                "circuit_breaker_active": False,
+            }
+        # Proportional: e.g. PG held 6 shares market_value ~1020, req 6 => 1020; req 3 => 510 — avoids 100.0 *6 =600 bug
+        if abs(held_qty) > 1e-9 and held_market_value > 0:
+            freed_notional = held_market_value * (req_qty / abs(held_qty))
+        else:
+            # Fallback only if broker data missing — resolve price then multiply
+            close_price = _resolve_price(close_symbol, close_leg, state)
+            freed_notional = req_qty * close_price
+            log_event("risk_close_fallback_price", level="warning", symbol=close_symbol, price=close_price, reason="held_market_value unavailable, used _resolve_price")
+    elif requested_close_notional is not None:
+        req_notional = abs(_to_float(requested_close_notional))
+        if req_notional > held_market_value + 1e-6:
+            close_decision = {
+                "decision": "reject",
+                "original": close_leg,
+                "reason": f"close_leg notional {req_notional:.2f} exceeds held market value {held_market_value:.2f} for {close_symbol}",
+            }
+            log_event("risk_rejected_paired_close_notional", symbol=close_symbol, requested=req_notional, held=held_market_value)
+            return {
+                "paired_trade": True,
+                "close_leg_decision": close_decision,
+                "open_leg_decision": {"decision": "reject", "original": open_leg, "reason": "close_leg invalid — open_leg not evaluated, funding is not confirmed"},
+                "sequencing": "close_then_open",
+                "circuit_breaker_active": False,
+            }
+        freed_notional = req_notional
+    else:
+        close_decision = {"decision": "reject", "original": close_leg, "reason": "close_leg missing qty and notional"}
+        return {
+            "paired_trade": True,
+            "close_leg_decision": close_decision,
+            "open_leg_decision": {"decision": "reject", "original": open_leg, "reason": "close_leg invalid — open_leg not evaluated, funding is not confirmed"},
+            "sequencing": "close_then_open",
+            "circuit_breaker_active": False,
+        }
+
+    close_decision = {
+        "decision": "approve",
+        "original": close_leg,
+        "reason": f"close_leg ok — reduces {close_symbol} exposure by {freed_notional:.2f}, within held {held_market_value:.2f}",
+    }
+    log_event("risk_approved_paired_close", symbol=close_symbol, freed_notional=freed_notional)
+
+    # --- open_leg: evaluate against POST-CLOSE state, not current state ---
+    post_close_exposure = max(0.0, existing_exposure - freed_notional)
+
+    open_price = _resolve_price(open_symbol, open_leg, state)
+    open_qty_raw = open_leg.get("qty")
+    open_notional_raw = open_leg.get("notional")
+    if open_qty_raw is not None:
+        open_qty = _to_float(open_qty_raw)
+    elif open_notional_raw is not None and open_price > 0:
+        open_qty = _to_float(open_notional_raw) / open_price
+    else:
+        open_decision = {"decision": "reject", "original": open_leg, "reason": "open_leg missing qty and notional"}
+        return {
+            "paired_trade": True,
+            "close_leg_decision": close_decision,
+            "open_leg_decision": open_decision,
+            "sequencing": "close_then_open",
+            "circuit_breaker_active": False,
+        }
+
+    pos_pass, adjusted_qty, pos_rule = check_position_limit(open_symbol, open_qty, open_price, equity)
+    effective_qty = adjusted_qty if not pos_pass else open_qty
+    effective_notional = abs(effective_qty * open_price)
+
+    exp_pass, exp_rule = check_exposure(effective_notional, post_close_exposure, equity)
+
+    if not exp_pass:
+        # Even after freeing capital, open_leg doesn't fit — reject open_leg, close_leg stands.
+        open_decision = {
+            "decision": "reject",
+            "original": open_leg,
+            "reason": f"open_leg still breaches exposure after freeing {freed_notional:.2f} from close_leg — {exp_rule}",
+        }
+        log_event("risk_rejected_paired_open_exposure", symbol=open_symbol, rule=exp_rule, post_close_exposure=post_close_exposure)
+    elif not pos_pass:
+        open_decision = {
+            "decision": "resize",
+            "original": open_leg,
+            "adjusted": {**open_leg, "qty": adjusted_qty, "notional": None},
+            "reason": f"open_leg resized against post-close state — {pos_rule}",
+        }
+        log_event("risk_approved_paired_open_resized", symbol=open_symbol, original_qty=open_qty, adjusted_qty=adjusted_qty)
+    else:
+        open_decision = {
+            "decision": "approve",
+            "original": open_leg,
+            "adjusted": None,
+            "reason": f"open_leg ok against post-close exposure — {exp_rule} (post-close base {post_close_exposure:.2f})",
+        }
+        log_event("risk_approved_paired_open", symbol=open_symbol, qty=effective_qty, post_close_exposure=post_close_exposure)
+
+    return {
+        "paired_trade": True,
+        "close_leg_decision": close_decision,
+        "open_leg_decision": open_decision,
+        "sequencing": "close_then_open",
+        "circuit_breaker_active": False,
+        "drawdown": drawdown,
+        "equity": equity,
+        "existing_exposure": existing_exposure,
+        "post_close_exposure": post_close_exposure,
+    }
+
+
 def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main risk evaluation — deterministic, pure, testable.
@@ -243,6 +580,7 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
     - approved_scaled: position limit scaled qty, exposure/drawdown still ok
     - rejected: exposure/drawdown/spxw block
     - no_trade: no strategy trade
+    - paired_trade: routed to evaluate_paired_trade() — returns the two-leg decision shape
     """
     # Check paused first — if breaker triggered, reject all
     if _is_paused():
@@ -258,6 +596,12 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     strategy = state.get("strategy") or {}
+    strategy = _parse_strategy_payload(strategy)
+
+    # Route paired_trade proposals to their own evaluator — separate shape, separate rules.
+    if strategy.get("paired_trade"):
+        return evaluate_paired_trade(state, strategy)
+
     # Strategy may be stub or built-in output string — extract
     action = str(strategy.get("action", "")).lower()
     raw_symbol = strategy.get("symbol")
@@ -298,17 +642,7 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
         qty = -qty
 
     # Fetch account state — prefer state["account_state"], else live broker
-    account_state = state.get("account_state")
-    if not account_state:
-        try:
-            from backend.broker.client import get_account, get_positions
-
-            acct = get_account()
-            positions = get_positions()
-            account_state = track_account_state(acct, positions)
-        except Exception as e:
-            log_event("risk_account_fetch_failed", level="warning", error=str(e)[:200])
-            account_state = {"equity": 100000, "cash": 100000, "peak_equity": 100000, "unrealized_pl": 0, "realized_pl": 0, "margin_usage": 0}
+    account_state = _load_account_state(state)
 
     equity = float(account_state.get("equity") or account_state.get("portfolio_value") or 0)
     peak = float(account_state.get("peak_equity") or equity)
@@ -347,42 +681,7 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
             }
 
     # Need price for notional checks — fetch via market or use last close
-    price = None
-    # Try strategy provided price
-    price = strategy.get("price") or strategy.get("limit_price") or strategy.get("entry_price")
-    if price is None:
-        # Try market snapshot
-        market_snapshot = state.get("market_snapshot")
-        if market_snapshot and isinstance(market_snapshot, dict):
-            # Find symbol in any timeframe
-            for tf_data in market_snapshot.values():
-                if isinstance(tf_data, list) and tf_data:
-                    for bar in tf_data:
-                        if str(bar.get("symbol", "")).upper() == symbol and bar.get("close"):
-                            try:
-                                price = float(bar["close"])
-                                break
-                            except Exception:
-                                pass
-                elif isinstance(tf_data, dict) and tf_data.get("close"):
-                    try:
-                        price = float(tf_data["close"])
-                        break
-                    except Exception:
-                        pass
-        # Fallback to live market fetch
-        if price is None:
-            try:
-                from backend.data.market import fetch_ohlcv
-
-                df = fetch_ohlcv(symbol, timeframe="1Day", limit=1)
-                if not df.empty and "close" in df.columns and not df["close"].isna().all():
-                    price = float(df["close"].iloc[-1])
-            except Exception:
-                pass
-    if price is None or price <= 0:
-        price = 100.0  # fallback for dry-run
-        log_event("risk_price_fallback", symbol=symbol, price=price)
+    price = _resolve_price(symbol, strategy, state)
 
     # Position limit check — may scale
     pos_pass, adjusted_qty, pos_rule = check_position_limit(symbol, qty, price, equity)
@@ -390,18 +689,7 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
         # Check if scaled qty still passes exposure/drawdown
         scaled_notional = abs(adjusted_qty * price)
         # Estimate existing exposure from positions
-        existing_exposure = 0.0
-        try:
-            from backend.broker.client import get_positions
-
-            positions = get_positions()
-            for p in positions:
-                try:
-                    existing_exposure += abs(float(p.get("market_value") or 0))
-                except Exception:
-                    pass
-        except Exception:
-            existing_exposure = 0.0
+        existing_exposure = _existing_exposure(_load_positions())
 
         exp_pass, exp_rule = check_exposure(scaled_notional, existing_exposure, equity)
         if not exp_pass:
@@ -430,18 +718,7 @@ def evaluate_risk(state: Dict[str, Any]) -> Dict[str, Any]:
 
     # Exposure check for non-scaled
     notional = abs(qty * price)
-    existing_exposure = 0.0
-    try:
-        from backend.broker.client import get_positions
-
-        positions = get_positions()
-        for p in positions:
-            try:
-                existing_exposure += abs(float(p.get("market_value") or 0))
-            except Exception:
-                pass
-    except Exception:
-        pass
+    existing_exposure = _existing_exposure(_load_positions())
 
     exp_pass, exp_rule = check_exposure(notional, existing_exposure, equity)
     if not exp_pass:

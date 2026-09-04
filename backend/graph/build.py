@@ -151,12 +151,32 @@ def build_graph(checkpointer=None):
                     }
             # Clean for human readable
             clean = re.sub(r"```[a-z]*\n?", "", text).replace("```", "").strip()
-            # Try to extract JSON and format nicely
+            # Try to extract JSON and format nicely — handle nested paired_trade/arb correctly (full json.loads first, like risk.py _parse_strategy_payload)
             try:
-                m = re.search(r"\{[^}]+\}", clean, re.DOTALL)
-                if m:
-                    j = json.loads(m.group(0))
-                    # Build human line
+                j = None
+                # Try full parse first (handles nested close_leg/open_leg)
+                try:
+                    j = json.loads(clean)
+                    if not isinstance(j, dict):
+                        j = None
+                except Exception:
+                    j = None
+                if j is None:
+                    m = re.search(r"\{[^{}]+\}", clean, re.DOTALL)
+                    if m:
+                        j = json.loads(m.group(0))
+                if j and isinstance(j, dict):
+                    # Paired-trade shape — preserve as-is, build human output from legs
+                    if j.get("paired_trade"):
+                        close = j.get("close_leg") or {}
+                        open_leg = j.get("open_leg") or {}
+                        return {
+                            "output": f"PAIRED {close.get('symbol','?')}->{open_leg.get('symbol','?')} | {j.get('rationale','')[:200]}",
+                            **j,
+                        }
+                    if j.get("arb"):
+                        return {"output": f"ARB {j.get('arb_pct','?')}% | {j.get('rationale','')[:200]}", **j}
+                    # Single-trade flat shape
                     action = j.get("action", "hold")
                     sym = j.get("symbol", "AAPL")
                     qty = j.get("qty", "?")
@@ -265,6 +285,150 @@ def build_graph(checkpointer=None):
                 "messages": result.get("messages", msgs),
             }
 
+        def reallocate_node(state: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Deterministic capital reallocation shim — Option B.
+            If strategy proposed a lone buy that would breach exposure, rewrite it to a paired_trade
+            (close weakest holding → open new) before Risk sees it. No LLM, pure math.
+            Mirrors risk.py helpers so exposure math never drifts.
+            """
+            s = _to_dict(state)
+            strat = s.get("strategy") or {}
+            # Already paired/arb/hold → no rewrite
+            if strat.get("paired_trade") or strat.get("arb"):
+                return s
+            action = str(strat.get("action", "")).lower()
+            if action not in ("buy",):
+                return s  # only buys need freeing; sells already reduce exposure
+            raw_symbol = strat.get("symbol")
+            raw_qty = strat.get("qty") if strat.get("qty") is not None else strat.get("notional")
+            if not raw_symbol or raw_qty is None:
+                return s
+            try:
+                qty = float(raw_qty)
+                if qty <= 0:
+                    return s
+            except Exception:
+                return s
+            symbol = str(raw_symbol).strip().upper()
+            # For sells, qty sign handled in risk; here keep positive
+            try:
+                # Reuse risk's helpers for consistent equity/exposure/price math
+                from backend.agents.risk import _existing_exposure, _load_account_state, _load_positions, _resolve_price
+
+                account_state = _load_account_state(s)
+                equity = float(account_state.get("equity") or account_state.get("portfolio_value") or 0)
+                if equity <= 0:
+                    return s
+                cfg = get_settings()
+                max_exp_pct = float(getattr(cfg, "risk_max_exposure_pct", 0.6))
+                positions = _load_positions()
+                if not positions:
+                    return s
+                existing_exposure = _existing_exposure(positions)
+                # Resolve price same way risk does
+                price = _resolve_price(symbol, strat, s)
+                if price is None or price <= 0:
+                    return s
+                new_notional = abs(qty * price)
+                # Would it breach?
+                gross = abs(existing_exposure) + abs(new_notional)
+                ratio = gross / equity if equity else 999
+                if ratio <= max_exp_pct:
+                    return s  # fits, no need to reallocate
+                # Find weakest holding: lowest unrealized_pl, but ensure it frees enough to fit new trade if possible
+                # Sort by unrealized_pl ascending (most negative first), then check exposure fit
+                candidates = []
+                for p in positions:
+                    p_sym = str(p.get("symbol", "")).upper()
+                    if not p_sym or p_sym == symbol:
+                        continue
+                    try:
+                        pl = float(p.get("unrealized_pl") or 0)
+                    except Exception:
+                        pl = 0
+                    try:
+                        mv = abs(float(p.get("market_value") or 0))
+                    except Exception:
+                        mv = 0
+                    candidates.append((pl, mv, p))
+                if not candidates:
+                    return s
+                candidates.sort(key=lambda x: x[0])  # weakest first
+                # Pick first candidate that frees enough (post_close + new <= cap), else fallback to weakest
+                weakest = None
+                weakest_pl = None
+                freed_needed = (existing_exposure + new_notional) - (equity * max_exp_pct)
+                # freed_needed >0 is amount we must free at minimum
+                for pl, mv, p in candidates:
+                    if mv >= freed_needed - 1e-6:
+                        weakest = p
+                        weakest_pl = pl
+                        break
+                if weakest is None:
+                    # No single position frees enough — pick weakest anyway (close will still execute, open may be rejected but reposition still happens)
+                    weakest, weakest_pl = candidates[0][2], candidates[0][0]
+                weak_sym = str(weakest.get("symbol", "")).strip().upper()
+                weak_qty = weakest.get("qty") or weakest.get("quantity")
+                try:
+                    weak_qty_f = abs(float(weak_qty))
+                    if weak_qty_f <= 0:
+                        return s
+                except Exception:
+                    return s
+                # Build paired_trade proposal preserving open leg's stop/target/rationale
+                open_leg: Dict[str, Any] = {
+                    "action": "buy",
+                    "symbol": symbol,
+                    "qty": qty,
+                }
+                # Preserve notional if strategy used it instead of qty
+                if strat.get("notional") is not None and strat.get("qty") is None:
+                    open_leg = {"action": "buy", "symbol": symbol, "notional": strat.get("notional")}
+                for k in ("stop_price", "target_price", "limit_price", "price", "notional"):
+                    if strat.get(k) is not None:
+                        open_leg[k] = strat.get(k)
+                close_leg = {"action": "sell", "symbol": weak_sym, "qty": weak_qty_f}
+                # Rationale: explain why rewrite happened
+                orig_rationale = str(strat.get("rationale") or strat.get("output") or "")[:180]
+                new_rationale = (
+                    f"Reallocated: weakest holding {weak_sym} (uPL {weakest_pl:.2f}) → {symbol} "
+                    f"(existing {existing_exposure:.0f}+new {new_notional:.0f}/{equity:.0f}={ratio:.2%} > cap {max_exp_pct:.0%}); "
+                    f"orig: {orig_rationale}"
+                )
+                paired = {
+                    "paired_trade": True,
+                    "close_leg": close_leg,
+                    "open_leg": open_leg,
+                    "rationale": new_rationale,
+                }
+                s["strategy"] = {**strat, **paired, "reallocated_from_single": True, "reallocate_reason": f"exposure {ratio:.3f} > {max_exp_pct:.3f}"}
+                # Keep messages in sync so downstream nodes see the rewrite
+                try:
+                    import json as _json
+
+                    s["messages"] = s.get("messages", []) + [{"role": "user", "content": f"[reallocate shim] Converted lone buy {symbol} qty {qty} to paired_trade close {weak_sym} qty {weak_qty_f} -> open {symbol} qty {qty} due to exposure breach"}]
+                except Exception:
+                    pass
+                log_event(
+                    "strategy_rewritten_paired",
+                    level="info",
+                    symbol=symbol,
+                    qty=qty,
+                    price=price,
+                    new_notional=new_notional,
+                    existing_exposure=existing_exposure,
+                    equity=equity,
+                    ratio=round(ratio, 4),
+                    cap=max_exp_pct,
+                    weakest=weak_sym,
+                    weakest_pl=weakest_pl,
+                    close_qty=weak_qty_f,
+                )
+            except Exception as e:
+                log_event("reallocate_shim_error", level="warning", error=str(e)[:200])
+            return s
+
         def risk_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Deterministic — not LLM, stays as plain function node
             return risk_agent(state)
@@ -275,9 +439,22 @@ def build_graph(checkpointer=None):
         def risk_router(state: Dict[str, Any]) -> str:
             """
             Conditional per PHASES.md Phase 5: approved → execution, approved_scaled → execution, rejected → end.
+            Paired-trade-aware: risk.get("paired_trade") => branch on close_leg_decision/open_leg_decision.
             Retry is handled via strategy re-invoke if retry_count < max (reserved for v2).
             """
             risk = state.get("risk", {}) or {}
+            # Paired-trade shape: {paired_trade:true, close_leg_decision:{decision}, open_leg_decision:{decision}} — handle before flat decision
+            if risk.get("paired_trade"):
+                close = (risk.get("close_leg_decision") or {}).get("decision", "")
+                open_d = (risk.get("open_leg_decision") or {}).get("decision", "")
+                close_ok = str(close).lower() in ("approved", "approved_scaled", "approve", "resize")
+                open_ok = str(open_d).lower() in ("approved", "approved_scaled", "resize")
+                # Per execution spec: close_then_open — if close approved, must go to execution even if open rejected (close is valid risk-reduction)
+                if close_ok or open_ok:
+                    log_event("graph_route_paired_trade", close_decision=str(close), open_decision=str(open_d), route="execution")
+                    return "execution"
+                log_event("graph_route_paired_trade", close_decision=str(close), open_decision=str(open_d), route="end")
+                return "end"
             decision = str(risk.get("decision", "no_trade")).lower()
             if decision in ("approved", "approved_scaled"):
                 return "execution"
@@ -287,6 +464,7 @@ def build_graph(checkpointer=None):
         graph = StateGraph(GraphState)
         graph.add_node("research", research_node)
         graph.add_node("strategy", strategy_node)
+        graph.add_node("reallocate", reallocate_node)
         graph.add_node("risk", risk_node)
         graph.add_node("execution", execution_node)
         # Reporting is on-demand via CLI /report (not per-cycle per DOC.md), but register for completeness
@@ -294,7 +472,8 @@ def build_graph(checkpointer=None):
 
         graph.add_edge(START, "research")
         graph.add_edge("research", "strategy")
-        graph.add_edge("strategy", "risk")
+        graph.add_edge("strategy", "reallocate")
+        graph.add_edge("reallocate", "risk")
         graph.add_conditional_edges("risk", risk_router, {"execution": "execution", "end": END})
         graph.add_edge("execution", END)
 
@@ -320,9 +499,72 @@ def _build_stub_graph():
         s: dict = dict(state or {})
         s = research_agent(s)
         s = strategy_agent(s)
+        # Deterministic shim for stub as well (mirrors reallocate_node with enough-free logic)
+        try:
+            strat = s.get("strategy") or {}
+            if not strat.get("paired_trade") and not strat.get("arb") and str(strat.get("action", "")).lower() == "buy" and strat.get("symbol") and strat.get("qty"):
+                from backend.agents.risk import _existing_exposure, _load_account_state, _load_positions, _resolve_price
+                from backend.core.config import get_settings as _get_settings
+
+                account_state = _load_account_state(s)
+                equity = float(account_state.get("equity") or account_state.get("portfolio_value") or 0)
+                if equity > 0:
+                    cfg = _get_settings()
+                    max_exp_pct = float(getattr(cfg, "risk_max_exposure_pct", 0.6))
+                    positions = _load_positions()
+                    if positions:
+                        existing_exposure = _existing_exposure(positions)
+                        symbol = str(strat.get("symbol")).strip().upper()
+                        qty = float(strat.get("qty"))
+                        price = _resolve_price(symbol, strat, s)
+                        if price and price > 0:
+                            new_notional = abs(qty * price)
+                            gross = abs(existing_exposure) + abs(new_notional)
+                            ratio = gross / equity if equity else 999
+                            if ratio > max_exp_pct:
+                                candidates = []
+                                for p in positions:
+                                    p_sym = str(p.get("symbol", "")).upper()
+                                    if not p_sym or p_sym == symbol:
+                                        continue
+                                    try:
+                                        pl = float(p.get("unrealized_pl") or 0)
+                                        mv = abs(float(p.get("market_value") or 0))
+                                    except Exception:
+                                        pl, mv = 0, 0
+                                    candidates.append((pl, mv, p))
+                                if candidates:
+                                    candidates.sort(key=lambda x: x[0])
+                                    freed_needed = (existing_exposure + new_notional) - (equity * max_exp_pct)
+                                    weakest = None
+                                    for pl, mv, p in candidates:
+                                        if mv >= freed_needed - 1e-6:
+                                            weakest = p
+                                            break
+                                    if weakest is None:
+                                        weakest = candidates[0][2]
+                                    weak_sym = str(weakest.get("symbol", "")).strip().upper()
+                                    weak_qty = abs(float(weakest.get("qty") or 0))
+                                    if weak_qty > 0:
+                                        open_leg = {"action": "buy", "symbol": symbol, "qty": qty}
+                                        for k in ("stop_price", "target_price", "limit_price", "price"):
+                                            if strat.get(k) is not None:
+                                                open_leg[k] = strat.get(k)
+                                        close_leg = {"action": "sell", "symbol": weak_sym, "qty": weak_qty}
+                                        s["strategy"] = {**strat, "paired_trade": True, "close_leg": close_leg, "open_leg": open_leg, "reallocated_from_single": True}
+                        # no log in stub to keep offline quiet
+        except Exception:
+            pass
         s = risk_agent(s)
-        decision = str(s.get("risk", {}).get("decision", "")).lower()
-        if decision in ("approved", "approved_scaled"):
+        risk = s.get("risk", {}) or {}
+        should_exec = False
+        if risk.get("paired_trade"):
+            close = (risk.get("close_leg_decision") or {}).get("decision", "")
+            open_d = (risk.get("open_leg_decision") or {}).get("decision", "")
+            should_exec = str(close).lower() in ("approved", "approved_scaled", "approve", "resize") or str(open_d).lower() in ("approved", "approved_scaled", "resize")
+        else:
+            should_exec = str(risk.get("decision", "")).lower() in ("approved", "approved_scaled")
+        if should_exec:
             s = execution_agent(s)
         return s
 

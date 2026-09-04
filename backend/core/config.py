@@ -236,35 +236,58 @@ class Settings(BaseSettings):
                 import re
 
                 found = re.findall(r"[A-Z]{2,}/[A-Z]{2,}|[A-Z]{1,5}", legacy)
-                # Filter plausible symbols (keep /USD pairs + equities)
-                filtered = [s.upper() for s in found if "/" in s or s in ("BTC", "ETH", "SOL", "AAPL", "SPY", "QQQ", "NVDA")]
+                # Filter plausible symbols (keep /USD pairs + equities) — extended crypto list for Option B
+                filtered = [s.upper() for s in found if "/" in s or s in ("BTC", "ETH", "SOL", "XRP", "DOGE", "DOT", "LINK", "LTC", "BCH", "XLM", "XMR", "ADA", "ETC", "AVAX", "MATIC", "AAPL", "SPY", "QQQ", "NVDA")]
                 if filtered:
                     return filtered[:10]
             return []
         parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
-        # Normalize crypto pairs: BTC -> BTC/USD if no slash and known crypto base
+        # Normalize crypto pairs: bare ticker -> TICKER/USD for known crypto base (Option B: extended list + dedupe)
+        crypto_bases = {"BTC", "ETH", "SOL", "XRP", "DOGE", "DOT", "LINK", "LTC", "BCH", "XLM", "XMR", "ADA", "ETC", "AVAX", "MATIC", "X"}
         normalized: List[str] = []
+        seen = set()
         for p in parts:
-            if "/" not in p and p in ("BTC", "ETH", "SOL", "AVAX", "MATIC"):
-                normalized.append(f"{p}/USD")
+            # Normalize
+            if "/" not in p and p in crypto_bases:
+                norm = f"{p}/USD"
             else:
-                normalized.append(p)
+                norm = p
+            # Dedupe preserving order
+            if norm not in seen:
+                seen.add(norm)
+                normalized.append(norm)
         return normalized[:20]
 
     def get_scheduler_prompt(self) -> str:
-        """Build scheduler prompt STRICTLY from SCHEDULER_SYMBOLS env — no hardcoded symbols. Legacy SCHEDULER_PROMPT overrides only if symbols empty."""
+        """Build scheduler prompt — Option B: honor SCHEDULER_PROMPT from .env when explicitly set, with {SCHEDULER_SYMBOLS} substitution. Falls back to derived prompt from symbols."""
         import os as _os
 
+        raw_prompt = (self.scheduler_prompt or _os.getenv("SCHEDULER_PROMPT") or "").strip()
+        # Strip surrounding quotes if dotenv left them (handles multiline quoted .env values)
+        if len(raw_prompt) >= 2 and ((raw_prompt[0] == '"' and raw_prompt[-1] == '"') or (raw_prompt[0] == "'" and raw_prompt[-1] == "'")):
+            raw_prompt = raw_prompt[1:-1].strip()
+        # Also strip stray leading/trailing quotes from multiline values
+        raw_prompt = raw_prompt.strip().strip('"').strip("'").strip() if raw_prompt.startswith('"') or raw_prompt.startswith("'") else raw_prompt
+
         symbols = self.get_scheduler_symbols()
+        joined = ", ".join(symbols) if symbols else ""
+
+        default_template = "Do Research On BTC/USD And Propose a Order"
+        # Option B: if custom prompt explicitly set in .env and not the default, honor it
+        if raw_prompt and raw_prompt != default_template:
+            # If placeholder present, substitute symbols — supports {SCHEDULER_SYMBOLS}, {symbols}, {joined}
+            if "{SCHEDULER_SYMBOLS}" in raw_prompt or "{symbols}" in raw_prompt or "{joined}" in raw_prompt:
+                substituted = raw_prompt.replace("{SCHEDULER_SYMBOLS}", joined).replace("{symbols}", joined).replace("{joined}", joined)
+                return substituted.strip()
+            # No placeholder: return custom prompt as-is (explicit fetch from .env)
+            return raw_prompt
+
         if symbols:
-            joined = ", ".join(symbols)
             return f"Do Research On {joined} And Propose a Order"
-        # Strict fallback: use SCHEDULER_PROMPT from env if set
-        prompt = (self.scheduler_prompt or _os.getenv("SCHEDULER_PROMPT") or "").strip()
-        if prompt:
-            return prompt
-        # Last resort (should not happen if .env.example set) — raise for strictness in prod, but return safe for tests
-        return "Do Research On BTC/USD And Propose a Order"
+        if raw_prompt:
+            return raw_prompt
+        # Last resort (should not happen if .env.example set)
+        return default_template
 
 
 @lru_cache

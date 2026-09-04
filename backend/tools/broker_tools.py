@@ -20,8 +20,17 @@ def get_account() -> str:
     """Get Alpaca paper account details including cash, portfolio value, buying power, and options level. No args needed."""
     try:
         data = broker_client.get_account()
+        # Audit: agent checked account — log summary (no secrets)
+        try:
+            pv = float(data.get("portfolio_value") or data.get("equity") or 0) if isinstance(data, dict) else 0
+            cash = float(data.get("cash") or 0) if isinstance(data, dict) else 0
+            bp = float(data.get("buying_power") or 0) if isinstance(data, dict) else 0
+            log_event("agent_get_account", level="info", portfolio_value=pv, cash=cash, buying_power=bp, status="ok")
+        except Exception:
+            log_event("agent_get_account", level="info", status="ok")
         return json.dumps({"connected": True, "account": data}, default=str)
     except Exception as e:
+        log_event("agent_get_account", level="warning", error=str(e)[:200], status="error")
         return json.dumps({"connected": False, "error": str(e), "type": type(e).__name__})
 
 
@@ -31,8 +40,21 @@ def get_positions(symbol: str = "") -> str:
     try:
         sym = normalize_symbol(symbol)
         positions = broker_client.get_positions(symbol=sym)
+        # Audit: agent checked positions — log summary
+        try:
+            symbols = [str(p.get("symbol", "")) for p in positions] if isinstance(positions, list) else []
+            # Include unrealized P&L summary (no full payload)
+            upl = 0.0
+            try:
+                upl = sum(float(p.get("unrealized_pl") or 0) for p in positions if isinstance(p, dict))
+            except Exception:
+                upl = 0.0
+            log_event("agent_get_positions", level="info", symbol=sym or "all", count=len(positions), symbols=symbols[:20], unrealized_pl=round(upl, 2), status="ok")
+        except Exception:
+            log_event("agent_get_positions", level="info", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, status="ok")
         return json.dumps({"count": len(positions), "positions": positions}, default=str)
     except Exception as e:
+        log_event("agent_get_positions", level="warning", symbol=symbol or "all", error=str(e)[:200], status="error")
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -46,8 +68,16 @@ def get_orders(status: str = "open", limit: int = 50, symbols: str = "") -> str:
         lim = clamp_limit(limit, default=50, min_val=1, max_val=500)
         syms = symbols.strip() if symbols.strip() else None
         orders = broker_client.get_orders(status=status, limit=lim, symbols=syms)
+        try:
+            log_event("agent_get_orders", level="info", status=status, limit=lim, symbols=syms or "all", count=len(orders) if isinstance(orders, list) else 0)
+        except Exception:
+            pass
         return json.dumps({"count": len(orders), "orders": orders, "status": status, "limit": lim}, default=str)
     except Exception as e:
+        try:
+            log_event("agent_get_orders", level="warning", status=status, error=str(e)[:200])
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -57,8 +87,16 @@ def get_clock() -> str:
     try:
         clock = broker_client.get_clock()
         is_open = bool(clock.get("is_open", False)) if isinstance(clock, dict) else False
+        try:
+            log_event("agent_get_clock", level="info", is_open=is_open, next_open=str(clock.get("next_open") or "") if isinstance(clock, dict) else "")
+        except Exception:
+            pass
         return json.dumps({"is_open": is_open, "clock": clock}, default=str)
     except Exception as e:
+        try:
+            log_event("agent_get_clock", level="warning", error=str(e)[:200])
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -68,12 +106,24 @@ def submit_order(symbol: str, qty: float, side: str = "buy", order_type: str = "
     try:
         sym = normalize_symbol(symbol)
         if not sym:
+            try:
+                log_event("agent_submit_order", level="warning", symbol=str(symbol), error="symbol required", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "symbol required"})
         try:
             q = float(qty)
         except (TypeError, ValueError):
+            try:
+                log_event("agent_submit_order", level="warning", symbol=sym, error="qty must be numeric >0", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "qty must be numeric >0"})
         if q <= 0:
+            try:
+                log_event("agent_submit_order", level="warning", symbol=sym, qty=q, error="qty must be >0", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "qty must be >0"})
         sd = side.strip().lower()
         if sd not in ("buy", "sell"):
@@ -83,6 +133,10 @@ def submit_order(symbol: str, qty: float, side: str = "buy", order_type: str = "
             ot = "market"
         # Note: actual submit via broker/client would be here; for Phase 7 stub, return indicative dry-run
         # When HITL approves, this tool executes; if rejected, middleware returns reject without calling
+        try:
+            log_event("agent_submit_order", level="info", symbol=sym, qty=q, side=sd, type=ot, limit_price=float(limit_price) if ot == "limit" and limit_price else None, status="dry_run")
+        except Exception:
+            pass
         return json.dumps(
             {
                 "status": "dry_run",
@@ -96,6 +150,10 @@ def submit_order(symbol: str, qty: float, side: str = "buy", order_type: str = "
             default=str,
         )
     except Exception as e:
+        try:
+            log_event("agent_submit_order", level="warning", symbol=str(symbol), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 

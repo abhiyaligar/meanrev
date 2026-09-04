@@ -125,6 +125,7 @@ def get_option_contracts(
             # raw may be dict
             if isinstance(raw, dict):
                 contracts = raw.get("option_contracts") or []
+                log_event("option_contracts_ok", underlyings=underlyings, count=len(contracts), via="client_get")
                 return json.dumps({"underlyings": underlyings, "count": len(contracts), "option_contracts": contracts, "page_token": raw.get("page_token")}, default=str)
 
         except Exception as e:
@@ -162,9 +163,14 @@ def get_option_contracts(
             log_event("option_contracts_rest_error", level="warning", error=str(e)[:200])
             return json.dumps({"error": f"Failed to fetch contracts for {underlyings}: {e}", "type": type(e).__name__})
 
+        log_event("option_contracts_failed", level="warning", underlyings=underlyings, error="No contracts method available")
         return json.dumps({"error": f"No contracts method available for {underlyings}"})
 
     except Exception as e:
+        try:
+            log_event("option_contracts_failed", level="warning", underlyings=str(underlying_symbols), error=str(e)[:200])
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -197,24 +203,52 @@ def place_option_order(
     try:
         occ = normalize_symbol(symbol)
         if not occ or len(occ) < 15:
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=str(symbol), error="symbol must be OCC", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": f"symbol must be OCC option symbol like AAPL240119C00190000, got {symbol!r}"})
         # qty must be whole
         try:
             q = int(float(qty))
         except (TypeError, ValueError):
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, error="qty must be whole", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "qty must be whole number (contracts)"})
         if q <= 0:
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, error="qty must be >0", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "qty must be >0"})
         if float(qty) != float(q):
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, qty=str(qty), error="qty not whole", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": f"qty must be whole number, got {qty} (docs: qty whole number for options)"})
         sd = side.strip().lower() if side else "buy"
         if sd not in ("buy", "sell"):
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, error="side must be buy/sell", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "side must be buy or sell"})
         ot = order_type.strip().lower() if order_type else "market"
         if ot not in ("market", "limit", "stop", "stop_limit"):
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, error="type invalid", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "type must be market|limit|stop|stop_limit (docs)"})
         tif = time_in_force.strip().lower() if time_in_force else "day"
         if tif not in ("day", "gtc"):
+            try:
+                log_event("option_order_validation_error", level="warning", symbol=occ, error="tif must be day/gtc", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "time_in_force must be day or gtc (docs)"})
         # Validate limit/stop prices
         lp = None
@@ -223,21 +257,41 @@ def place_option_order(
             try:
                 lp = float(limit_price)
             except (TypeError, ValueError):
+                try:
+                    log_event("option_order_validation_error", level="warning", symbol=occ, error="limit_price required", status="validation_error")
+                except Exception:
+                    pass
                 return json.dumps({"error": "limit_price required >0 for limit/stop_limit"})
             if lp <= 0:
+                try:
+                    log_event("option_order_validation_error", level="warning", symbol=occ, error="limit_price must be >0", status="validation_error")
+                except Exception:
+                    pass
                 return json.dumps({"error": "limit_price must be >0"})
         if ot in ("stop", "stop_limit"):
             try:
                 sp = float(stop_price)
             except (TypeError, ValueError):
+                try:
+                    log_event("option_order_validation_error", level="warning", symbol=occ, error="stop_price required", status="validation_error")
+                except Exception:
+                    pass
                 return json.dumps({"error": "stop_price required >0 for stop/stop_limit"})
             if sp <= 0:
+                try:
+                    log_event("option_order_validation_error", level="warning", symbol=occ, error="stop_price must be >0", status="validation_error")
+                except Exception:
+                    pass
                 return json.dumps({"error": "stop_price must be >0"})
         # Check account level for hint
         try:
             acct = broker_client.get_account()
             level = int(acct.get("options_approved_level") or acct.get("options_trading_level") or 0)
             if level == 0:
+                try:
+                    log_event("option_order_validation_error", level="warning", symbol=occ, error="options level 0", status="validation_error")
+                except Exception:
+                    pass
                 return json.dumps({"error": "Options trading disabled (level 0). Enable in Dashboard > Account > Configure (docs Enablement).", "level": level})
         except Exception:
             pass  # non-fatal
@@ -260,6 +314,10 @@ def place_option_order(
         log_event("option_order_submitted", symbol=occ, qty=q, side=sd, type=ot, tif=tif, order_id=str(result.get("id", "")))
         return json.dumps({"status": "submitted", "order": result, "symbol": occ, "qty": q, "side": sd, "type": ot}, default=str)
     except Exception as e:
+        try:
+            log_event("option_order_failed", level="warning", symbol=str(symbol), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -275,10 +333,21 @@ def get_option_chain_docs(underlying: str = "AAPL", limit: int = 10, expiration_
         expiration_date: optional filter YYYY-MM-DD (uses expiration_date_lte per docs)
     Returns same as get_option_contracts but simplified for single underlying.
     """
+    try:
+        log_event("option_chain_docs_invoked", underlying=str(underlying), limit=int(limit) if str(limit).isdigit() else 10, expiration_date=str(expiration_date)[:10])
+    except Exception:
+        pass
     kwargs: Dict[str, Any] = {"underlying_symbols": underlying, "limit": limit}
     if expiration_date:
         kwargs["expiration_date_lte"] = expiration_date
-    return get_option_contracts.invoke(kwargs)  # type: ignore
+    result = get_option_contracts.invoke(kwargs)  # type: ignore
+    try:
+        data = json.loads(result) if isinstance(result, str) else {}
+        cnt = data.get("count", 0) if isinstance(data, dict) else 0
+        log_event("option_chain_docs_ok", underlying=str(underlying), limit=int(limit) if str(limit).isdigit() else 10, count=cnt, status="ok" if "error" not in data else "error")
+    except Exception:
+        pass
+    return result
 
 
 __all__ = ["get_option_contracts", "place_option_order", "get_option_chain_docs"]

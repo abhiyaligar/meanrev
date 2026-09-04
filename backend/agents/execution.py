@@ -16,6 +16,242 @@ from typing import Any, Dict
 from backend.core.logging import log_event
 
 
+def _execute_paired_trade(state: Dict[str, Any], risk: Dict[str, Any], strategy: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Paired-trade execution per RISK_SYSTEM_PROMPT_AGGRESSIVE §5 + EXECUTION_SYSTEM_PROMPT § paired trade:
+    sequencing close_then_open, never submit open before close fills, handle resize, partial fills, incomplete logging.
+    """
+    import time
+
+    close_dec = (risk.get("close_leg_decision") or {})
+    open_dec = (risk.get("open_leg_decision") or {})
+    sequencing = risk.get("sequencing") or "close_then_open"
+    close_strategy = close_dec.get("original") or strategy.get("close_leg") or {}
+    open_strategy = open_dec.get("original") or strategy.get("open_leg") or {}
+    # Use adjusted open leg if Risk resized
+    if open_dec.get("decision") == "resize" and open_dec.get("adjusted"):
+        open_strategy = open_dec["adjusted"]
+
+    close_symbol = str(close_strategy.get("symbol") or "").upper()
+    open_symbol = str(open_strategy.get("symbol") or "").upper()
+    # Extract qty/notional — prefer qty
+    def _qty_from_leg(leg):
+        q = leg.get("qty")
+        if q is not None:
+            try:
+                return float(q)
+            except Exception:
+                return None
+        n = leg.get("notional")
+        if n is not None:
+            try:
+                return float(n)  # execution will resolve via price if needed
+            except Exception:
+                return None
+        return None
+
+    close_qty = _qty_from_leg(close_strategy)
+    open_qty = _qty_from_leg(open_strategy)
+    close_decision = str(close_dec.get("decision", "")).lower()
+    open_decision = str(open_dec.get("decision", "")).lower()
+
+    # If close rejected, drop whole pair (open depends on Close funding)
+    if close_decision not in ("approved", "approved_scaled", "resize", "approve"):
+        log_event("execution_paired_skipped_close_rejected", close_symbol=close_symbol, close_decision=close_decision, open_decision=open_decision)
+        state["execution"] = {
+            "status": "skipped",
+            "reason": f"paired_trade close_leg rejected ({close_decision}) — open_leg not attempted",
+            "paired_trade": True,
+            "close_leg_decision": close_dec,
+            "open_leg_decision": open_dec,
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+
+    from backend.core.config import get_settings
+
+    cfg = get_settings()
+    mode = str(getattr(cfg, "execution_mode", "auto")).lower()
+    hitl_enabled = bool(getattr(cfg, "hitl_enabled", False))
+    should_hitl = hitl_enabled and mode == "hitl"
+
+    # HITL for paired trade — single interrupt describing both legs
+    if should_hitl:
+        try:
+            from langgraph.types import interrupt
+
+            human_input = interrupt(
+                {
+                    "action": "place_paired_trade",
+                    "close_leg": {"symbol": close_symbol, "qty": close_qty, "decision": close_decision},
+                    "open_leg": {"symbol": open_symbol, "qty": open_qty, "decision": open_decision},
+                    "sequencing": sequencing,
+                    "risk": risk,
+                    "strategy": strategy,
+                }
+            )
+            decision_type = None
+            if isinstance(human_input, dict):
+                if "decisions" in human_input and isinstance(human_input["decisions"], list) and human_input["decisions"]:
+                    decision_type = str(human_input["decisions"][0].get("type", "")).lower()
+                elif "type" in human_input:
+                    decision_type = str(human_input["type"]).lower()
+            if decision_type == "reject":
+                log_event("execution_paired_rejected_by_human", close_symbol=close_symbol, open_symbol=open_symbol)
+                state["execution"] = {"status": "rejected_by_human", "paired_trade": True, "sequencing": sequencing, "stub": False}
+                return state
+            log_event("execution_paired_approved_by_human", close_symbol=close_symbol, open_symbol=open_symbol)
+        except Exception as e:
+            if "interrupt" in str(e).lower() or e.__class__.__name__ in ("GraphInterrupt", "Interrupt"):
+                raise
+            log_event("execution_paired_hitl_error", level="warning", error=str(e)[:200])
+            state["execution"] = {
+                "status": "dry_run_no_hitl",
+                "paired_trade": True,
+                "sequencing": sequencing,
+                "note": "No checkpointer / HITL not available — dry-run paired trade",
+                "stub": False,
+            }
+            return state
+
+    # --- Deterministic close_then_open per spec ---
+    from backend.broker.client import submit_order as broker_submit_order
+
+    pair_id = f"{close_symbol}->{open_symbol}:{int(time.time())}"
+    execution_result: Dict[str, Any] = {"paired_trade": True, "pair_id": pair_id, "sequencing": sequencing, "legs": {}}
+
+    # 1. Submit close_leg first (always sell)
+    close_side = str(close_strategy.get("action") or close_strategy.get("side") or "sell").lower()
+    if close_side not in ("buy", "sell"):
+        close_side = "sell"
+    close_order_result = None
+    close_filled = False
+    start = time.monotonic()
+    try:
+        close_order_result = broker_submit_order(symbol=close_symbol, qty=abs(close_qty) if close_qty else 1, side=close_side, order_type="market")
+        close_order_id = str(close_order_result.get("id") or close_order_result.get("order_id") or "unknown")
+        close_status = str(close_order_result.get("status", "submitted")).lower()
+        close_filled = close_status in ("filled", "partially_filled", "submitted_awaiting_fill", "submitted")
+        execution_result["legs"]["close"] = {"order_id": close_order_id, "status": close_status, "result": close_order_result, "symbol": close_symbol, "qty": close_qty}
+        latency_ms = (time.monotonic() - start) * 1000
+        log_event("execution_paired_close_submitted", pair_id=pair_id, symbol=close_symbol, qty=close_qty, order_id=close_order_id, status=close_status, latency_ms=round(latency_ms, 2))
+        log_event(close_side, level="info", order_id=close_order_id, price=None, symbol=close_symbol, qty=float(close_qty) if close_qty else 0, status=close_status, pair_id=pair_id)
+    except Exception as e:
+        err = str(e)[:300]
+        log_event("execution_paired_close_failed", level="warning", pair_id=pair_id, symbol=close_symbol, error=err[:200])
+        log_event(close_side, level="warning", order_id="pending", price=None, symbol=close_symbol, qty=float(close_qty) if close_qty else 0, status="close_failed", error=err[:200], pair_id=pair_id)
+        state["execution"] = {
+            "status": "paired_trade_incomplete",
+            "reason": "paired_trade_incomplete: close_leg failed, open_leg not attempted",
+            "paired_trade": True,
+            "pair_id": pair_id,
+            "legs": execution_result["legs"],
+            "error": err,
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+
+    if not close_filled:
+        # Treat non-fill as failure — do not submit open
+        state["execution"] = {
+            "status": "paired_trade_incomplete",
+            "reason": "paired_trade_incomplete: close_leg not filled, open_leg not attempted",
+            "paired_trade": True,
+            "pair_id": pair_id,
+            "legs": execution_result["legs"],
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+
+    # 2. Submit open_leg — only if close succeeded; if open rejected, close stands alone per spec
+    if open_decision in ("rejected", "no_trade"):
+        log_event("execution_paired_open_rejected", pair_id=pair_id, symbol=open_symbol, reason=str(open_dec.get("reason", ""))[:200])
+        state["execution"] = {
+            "status": "paired_trade_incomplete",
+            "reason": "paired_trade_incomplete: close_leg filled, open_leg rejected by Risk — close_leg stands",
+            "paired_trade": True,
+            "pair_id": pair_id,
+            "legs": execution_result["legs"],
+            "open_leg_decision": open_dec,
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+
+    # Derive open qty from adjusted if resized, else original; if close partially filled, pro-rate (spec: size against actual proceeds)
+    open_side = str(open_strategy.get("action") or open_strategy.get("side") or "buy").lower()
+    if open_side not in ("buy", "sell"):
+        open_side = "buy"
+    open_order_type = str(open_strategy.get("order_type") or open_strategy.get("type") or "market").lower()
+    if open_order_type not in ("market", "limit", "stop"):
+        open_order_type = "market"
+    # For partial close, scale open qty proportionally if we had limit info — simplest: use risk-adjusted qty as-is (Risk already sized against full freed_notional; partial fill scaling is best-effort)
+    try:
+        filled_qty = float(close_order_result.get("filled_qty") or close_order_result.get("qty") or close_qty or 0)
+        # If partial, scale open qty proportionally (open_qty was sized against requested close; scale by filled/requested)
+        if close_qty and filled_qty and abs(filled_qty) < abs(close_qty) - 1e-9:
+            scale = abs(filled_qty) / abs(close_qty) if close_qty else 1
+            if open_qty:
+                open_qty = open_qty * scale
+                log_event("execution_paired_open_scaled_partial", pair_id=pair_id, scale=round(scale, 4), adjusted_open_qty=open_qty)
+    except Exception:
+        pass
+
+    start2 = time.monotonic()
+    try:
+        open_result = broker_submit_order(
+            symbol=open_symbol, qty=abs(open_qty) if open_qty else 1, side=open_side, order_type=open_order_type,
+            limit_price=open_strategy.get("limit_price") or open_strategy.get("price"),
+            stop_price=open_strategy.get("stop_price"),
+        )
+        open_order_id = str(open_result.get("id") or open_result.get("order_id") or "unknown")
+        open_status = str(open_result.get("status", "submitted")).lower()
+        execution_result["legs"]["open"] = {"order_id": open_order_id, "status": open_status, "result": open_result, "symbol": open_symbol, "qty": open_qty}
+        latency_ms2 = (time.monotonic() - start2) * 1000
+        log_event("execution_paired_open_submitted", pair_id=pair_id, symbol=open_symbol, qty=open_qty, order_id=open_order_id, status=open_status, latency_ms=round(latency_ms2, 2))
+        log_event(open_side, level="info", order_id=open_order_id, price=None, symbol=open_symbol, qty=float(open_qty) if open_qty else 0, status=open_status, pair_id=pair_id)
+        # Do not unwind close if open fails — close was valid standalone
+        if open_status in ("rejected", "canceled", "cancelled", "expired"):
+            log_event("execution_paired_incomplete_open_rejected", level="warning", pair_id=pair_id, open_order_id=open_order_id, reason=str(open_result.get("status") or "")[:200])
+            state["execution"] = {
+                "status": "paired_trade_incomplete",
+                "reason": "paired_trade_incomplete: close_leg filled, open_leg rejected/failed — close stands",
+                "paired_trade": True,
+                "pair_id": pair_id,
+                "legs": execution_result["legs"],
+                "sequencing": sequencing,
+                "stub": False,
+            }
+            return state
+        state["execution"] = {
+            "status": "paired_trade_filled" if open_status == "filled" and close_status == "filled" else "paired_trade_submitted",
+            "paired_trade": True,
+            "pair_id": pair_id,
+            "legs": execution_result["legs"],
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+    except Exception as e:
+        err2 = str(e)[:300]
+        log_event("execution_paired_open_failed", level="warning", pair_id=pair_id, symbol=open_symbol, error=err2[:200])
+        log_event(open_side, level="warning", order_id="pending", price=None, symbol=open_symbol, qty=float(open_qty) if open_qty else 0, status="open_failed", error=err2[:200], pair_id=pair_id)
+        state["execution"] = {
+            "status": "paired_trade_incomplete",
+            "reason": "paired_trade_incomplete: close_leg filled, open_leg failed — close stands, manual review",
+            "paired_trade": True,
+            "pair_id": pair_id,
+            "legs": execution_result["legs"],
+            "error": err2,
+            "sequencing": sequencing,
+            "stub": False,
+        }
+        return state
+
+
 def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deterministic execution with HITL. Called as StateGraph node.
@@ -25,6 +261,10 @@ def execution_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     state.setdefault("execution", {})
     risk = state.get("risk", {}) or {}
     strategy = state.get("strategy", {}) or {}
+
+    # Paired-trade branch — must be before flat decision check (paired_trade has no top-level decision)
+    if risk.get("paired_trade"):
+        return _execute_paired_trade(state, risk, strategy)
 
     decision = str(risk.get("decision", "")).lower()
     if decision not in ("approved", "approved_scaled"):

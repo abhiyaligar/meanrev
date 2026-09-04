@@ -65,7 +65,7 @@ class GraphState(BaseModel):
     )
     risk: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Risk verdict (RiskVerdict): {decision: approved|approved_scaled|rejected|no_trade, rule: str, adjusted_qty: float, original_qty: float, stub: bool}",
+        description="Risk verdict (RiskVerdict): single {decision: approved|approved_scaled|rejected|no_trade, rule, adjusted_qty} or paired_trade {paired_trade:true, close_leg_decision:{decision}, open_leg_decision:{decision,adjusted}, sequencing:close_then_open}",
     )
     execution: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -181,10 +181,27 @@ class GraphState(BaseModel):
         return bool(self.market_snapshot and any(v for v in self.market_snapshot.values()))
 
     def is_risk_approved(self) -> bool:
+        # Paired trade: approved if either leg is approved/resize (close_then_open); else flat decision
+        # Risk emits "approve" (without d) for close_leg; accept both forms
+        if self.risk and self.risk.get("paired_trade"):
+            close = str((self.risk.get("close_leg_decision") or {}).get("decision", "")).lower()
+            open_d = str((self.risk.get("open_leg_decision") or {}).get("decision", "")).lower()
+            return close in ("approved", "approved_scaled", "approve", "resize") or open_d in ("approved", "approved_scaled", "approve", "resize")
         return bool(self.risk and self.risk.get("decision") == "approved")
 
     def is_risk_scaled(self) -> bool:
+        if self.risk and self.risk.get("paired_trade"):
+            open_d = str((self.risk.get("open_leg_decision") or {}).get("decision", "")).lower()
+            return open_d in ("resize", "approved_scaled")
         return bool(self.risk and self.risk.get("decision") == "approved_scaled")
 
     def is_risk_rejected(self) -> bool:
+        if self.risk and self.risk.get("paired_trade"):
+            close = str((self.risk.get("close_leg_decision") or {}).get("decision", "")).lower()
+            open_d = str((self.risk.get("open_leg_decision") or {}).get("decision", "")).lower()
+            # Both legs rejected/no_trade => rejected
+            return close in ("rejected", "no_trade") and open_d in ("rejected", "no_trade", "")
         return bool(self.risk and self.risk.get("decision") in ("rejected", "no_trade"))
+
+    def is_paired_trade(self) -> bool:
+        return bool(self.risk and self.risk.get("paired_trade") is True)

@@ -7,6 +7,7 @@ All calls cached (5 min) and never log secrets; sentiment via lexicon.
 
 import json
 from langchain.tools import tool
+from backend.core.logging import log_event
 from backend.data.news import (
     extract_keywords as _extract_keywords,
     fetch_news as _fetch_news,
@@ -26,8 +27,16 @@ def fetch_news(symbols: str = "", limit: int = 10) -> str:
         lim = min(lim, 100)
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols.strip() else None
         headlines = _fetch_news(symbols=syms, limit=lim)
+        try:
+            log_event("news_fetch", level="info", symbols=",".join(syms) if syms else "general", limit=lim, count=len(headlines) if isinstance(headlines, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps({"count": len(headlines), "headlines": headlines}, default=str)
     except Exception as e:
+        try:
+            log_event("news_fetch", level="warning", symbols=str(symbols)[:100], error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -46,6 +55,10 @@ def get_macro_calendar(days_ahead: int = 7) -> str:
         cal = _get_macro_calendar(days_ahead=d)
         finnhub_events = cal.get("finnhub", [])
         fred_events = cal.get("fred", [])
+        try:
+            log_event("news_macro_calendar", level="info", days_ahead=d, finnhub_count=len(finnhub_events) if isinstance(finnhub_events, list) else 0, fred_count=len(fred_events) if isinstance(fred_events, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps(
             {
                 "finnhub": {"count": len(finnhub_events), "events": finnhub_events},
@@ -54,6 +67,10 @@ def get_macro_calendar(days_ahead: int = 7) -> str:
             default=str,
         )
     except Exception as e:
+        try:
+            log_event("news_macro_calendar", level="warning", error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -70,6 +87,14 @@ def extract_keywords(symbols: str = "", top_k: int = 10) -> str:
         # Reuse fetch_news for headlines
         headlines = _fetch_news(symbols=syms, limit=20)
         keywords = _extract_keywords(headlines, top_k=k)
+        try:
+            log_event("news_extract_keywords", level="info", symbols=",".join(syms) if syms else "general", top_k=k, count=len(keywords) if isinstance(keywords, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps({"keywords": keywords, "count": len(keywords)}, default=str)
     except Exception as e:
+        try:
+            log_event("news_extract_keywords", level="warning", symbols=str(symbols)[:100], error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})

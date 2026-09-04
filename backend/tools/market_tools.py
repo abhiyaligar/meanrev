@@ -9,6 +9,7 @@ provides indicative Greeks so every strategy can include options.
 import json
 from langchain.tools import tool
 
+from backend.core.logging import log_event
 from backend.data.market import align_timeframes as _align_timeframes, fetch_ohlcv as _fetch_ohlcv, fetch_option_chain as _fetch_option_chain, get_market_snapshot as _get_market_snapshot_data
 
 
@@ -18,6 +19,10 @@ def get_ohlcv(symbol: str, timeframe: str = "1Day", limit: int = 50) -> str:
     try:
         sym = symbol.strip().upper()
         if not sym:
+            try:
+                log_event("market_get_ohlcv", level="warning", error="symbol required", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "symbol required"})
         try:
             lim = int(limit)
@@ -28,6 +33,10 @@ def get_ohlcv(symbol: str, timeframe: str = "1Day", limit: int = 50) -> str:
         lim = min(lim, 500)
         df = _fetch_ohlcv(sym, timeframe=timeframe, limit=lim)
         if df.empty:
+            try:
+                log_event("market_get_ohlcv", level="info", symbol=sym, timeframe=timeframe, limit=lim, count=0, status="empty")
+            except Exception:
+                pass
             return json.dumps({"symbol": sym, "timeframe": timeframe, "count": 0, "bars": []})
         # Tail to limit and convert to records with ISO timestamps
         tail = df.tail(lim)
@@ -35,8 +44,16 @@ def get_ohlcv(symbol: str, timeframe: str = "1Day", limit: int = 50) -> str:
         records = tail.reset_index().to_dict(orient="records")
         # Redact to last 5 for token discipline
         sample = records[-5:]
+        try:
+            log_event("market_get_ohlcv", level="info", symbol=sym, timeframe=timeframe, limit=lim, count=len(df), status="ok")
+        except Exception:
+            pass
         return json.dumps({"symbol": sym, "timeframe": timeframe, "count": len(df), "sample_bars": sample}, default=str)
     except Exception as e:
+        try:
+            log_event("market_get_ohlcv", level="warning", symbol=str(symbol), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -46,12 +63,24 @@ def get_market_snapshot(symbol: str, timeframes: str = "1Day,1Hour") -> str:
     try:
         sym = symbol.strip().upper()
         if not sym:
+            try:
+                log_event("market_snapshot", level="warning", error="symbol required", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "symbol required"})
         tfs = [t.strip() for t in timeframes.split(",") if t.strip()] if timeframes else ["1Day", "1Hour"]
         frames = _get_market_snapshot_data(sym, timeframes=tfs)
         summary = {tf: {"rows": len(df), "has_indicators": not df.empty and "rsi" in df.columns} for tf, df in frames.items()}
+        try:
+            log_event("market_snapshot", level="info", symbol=sym, timeframes=",".join(tfs), counts=summary, status="ok")
+        except Exception:
+            pass
         return json.dumps({"symbol": sym, "timeframes": summary}, default=str)
     except Exception as e:
+        try:
+            log_event("market_snapshot", level="warning", symbol=str(symbol), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -61,6 +90,10 @@ def get_option_chain(underlying: str, expiration: str = "", limit: int = 10) -> 
     try:
         sym = underlying.strip().upper()
         if not sym:
+            try:
+                log_event("market_option_chain", level="warning", error="underlying required", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "underlying required"})
         try:
             lim = int(limit)
@@ -71,8 +104,16 @@ def get_option_chain(underlying: str, expiration: str = "", limit: int = 10) -> 
         lim = min(lim, 100)
         exp = expiration.strip() if expiration.strip() else None
         chain = _fetch_option_chain(sym, expiration=exp, limit=lim)
+        try:
+            log_event("market_option_chain", level="info", underlying=sym, expiration=exp or "auto", limit=lim, count=len(chain) if isinstance(chain, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps({"underlying": sym, "count": len(chain), "chain": chain}, default=str)
     except Exception as e:
+        try:
+            log_event("market_option_chain", level="warning", underlying=str(underlying), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -82,12 +123,24 @@ def align_timeframes_tool(symbol: str, timeframes: str = "1Day,1Hour") -> str:
     try:
         sym = symbol.strip().upper()
         if not sym:
+            try:
+                log_event("market_align_timeframes", level="warning", error="symbol required", status="validation_error")
+            except Exception:
+                pass
             return json.dumps({"error": "symbol required"})
         tfs = [t.strip() for t in timeframes.split(",") if t.strip()] if timeframes else ["1Day", "1Hour"]
         frames = _get_market_snapshot_data(sym, timeframes=tfs)
         aligned = _align_timeframes(frames)
         if aligned.empty:
+            try:
+                log_event("market_align_timeframes", level="info", symbol=sym, timeframes=",".join(tfs), rows=0, status="empty")
+            except Exception:
+                pass
             return json.dumps({"symbol": sym, "aligned": False, "reason": "no data"})
+        try:
+            log_event("market_align_timeframes", level="info", symbol=sym, timeframes=",".join(tfs), rows=len(aligned), cols=len(aligned.columns), status="ok")
+        except Exception:
+            pass
         return json.dumps(
             {
                 "symbol": sym,
@@ -99,6 +152,10 @@ def align_timeframes_tool(symbol: str, timeframes: str = "1Day,1Hour") -> str:
             default=str,
         )
     except Exception as e:
+        try:
+            log_event("market_align_timeframes", level="warning", symbol=str(symbol), error=str(e)[:200], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
@@ -377,6 +434,10 @@ def detect_arbitrage(pairs: str, threshold_pct: float = 0.2) -> str:
                         }
 
         if not best:
+            try:
+                log_event("market_detect_arbitrage", level="info", pairs=",".join(pairs_list), prices=prices, arb=False, status="no_arb")
+            except Exception:
+                pass
             return json.dumps({"pairs": pairs_list, "prices": prices, "arb": False, "message": "No triangular arb found with given pairs — try different combination like BTC/USD,BTC/ETH,ETH/USD"})
 
         is_arb = best["abs_pct"] >= thresh
@@ -398,6 +459,14 @@ def detect_arbitrage(pairs: str, threshold_pct: float = 0.2) -> str:
             "legs": best["legs"],
             "human_readable": human,
         }
+        try:
+            log_event("market_detect_arbitrage", level="info", pairs=",".join(pairs_list), count=len(pairs_list), arb=is_arb, arb_pct=best["arb_pct"], abs_pct=best["abs_pct"], target=best["target"], threshold_pct=thresh, status="ok")
+        except Exception:
+            pass
         return json.dumps(result, default=str)
     except Exception as e:
+        try:
+            log_event("market_detect_arbitrage", level="warning", pairs=str(pairs), error=str(e)[:300], status="error")
+        except Exception:
+            pass
         return json.dumps({"error": str(e)[:500], "type": type(e).__name__})

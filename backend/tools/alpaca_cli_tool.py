@@ -90,14 +90,27 @@ def alpaca_cli_account() -> str:
     """
     cli = _run_alpaca_cli(["account", "show"])
     if cli.get("ok"):
+        try:
+            data = cli["data"]
+            pv = float(data.get("portfolio_value") or data.get("equity") or 0) if isinstance(data, dict) else 0
+            log_event("alpaca_cli_account", level="info", source="alpaca_cli", connected=True, portfolio_value=pv, status="ok")
+        except Exception:
+            log_event("alpaca_cli_account", level="info", source="alpaca_cli", connected=True, status="ok")
         return json.dumps({"source": "alpaca_cli", "connected": True, "account": cli["data"]}, default=str)
     # Fallback to throttled broker client (no mock — real data or explicit error)
     try:
         data = broker_client.get_account()
         if not data:
+            log_event("alpaca_cli_account", level="warning", source="alpaca_cli_fallback", connected=False, error="No data available", status="empty")
             return json.dumps({"source": "alpaca_cli_fallback", "connected": False, "error": "No data available for account via Alpaca CLI and broker fallback — check ALPACA_API_KEY/SECRET"}, default=str)
+        try:
+            pv = float(data.get("portfolio_value") or data.get("equity") or 0) if isinstance(data, dict) else 0
+            log_event("alpaca_cli_account", level="info", source="alpaca_cli_fallback", connected=True, portfolio_value=pv, cli_error=str(cli.get("error") or "")[:100], status="ok")
+        except Exception:
+            log_event("alpaca_cli_account", level="info", source="alpaca_cli_fallback", connected=True, status="ok")
         return json.dumps({"source": "alpaca_cli_fallback", "connected": True, "account": data, "cli_error": cli.get("error")}, default=str)
     except Exception as e:
+        log_event("alpaca_cli_account", level="warning", source="alpaca_cli_fallback", error=str(e)[:200], status="error")
         return json.dumps({"source": "alpaca_cli_fallback", "connected": False, "error": str(e), "type": type(e).__name__, "cli_error": cli.get("error")}, default=str)
 
 
@@ -118,14 +131,24 @@ def alpaca_cli_positions(symbol: str = "") -> str:
         # Filter if sym requested but CLI returned all
         if sym and isinstance(positions, list):
             positions = [p for p in positions if str(p.get("symbol", "")).upper() == sym]
+        try:
+            log_event("alpaca_cli_positions", level="info", source="alpaca_cli", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli", "count": len(positions), "positions": positions}, default=str)
     # Fallback
     try:
         positions = broker_client.get_positions(symbol=sym)
         if positions is None:
             positions = []
+        try:
+            symbols = [str(p.get("symbol", "")) for p in positions[:20]] if isinstance(positions, list) else []
+            log_event("alpaca_cli_positions", level="info", source="alpaca_cli_fallback", symbol=sym or "all", count=len(positions) if isinstance(positions, list) else 0, symbols=symbols, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli_fallback", "count": len(positions), "positions": positions, "cli_error": cli.get("error")}, default=str)
     except Exception as e:
+        log_event("alpaca_cli_positions", level="warning", source="alpaca_cli_fallback", symbol=sym or "all", error=str(e)[:200], status="error")
         return json.dumps({"source": "alpaca_cli_fallback", "error": str(e), "type": type(e).__name__, "cli_error": cli.get("error")}, default=str)
 
 
@@ -154,6 +177,10 @@ def alpaca_cli_orders(status: str = "open", limit: int = 50, symbols: str = "") 
             orders = [o for o in orders if str(o.get("symbol", "")).upper() in wanted]
         # Clamp limit locally
         orders = orders[:lim]
+        try:
+            log_event("alpaca_cli_orders", level="info", source="alpaca_cli", status=status_norm, limit=lim, symbols=symbols or "all", count=len(orders) if isinstance(orders, list) else 0)
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli", "count": len(orders), "orders": orders, "status": status_norm, "limit": lim}, default=str)
     # Fallback
     try:
@@ -161,8 +188,13 @@ def alpaca_cli_orders(status: str = "open", limit: int = 50, symbols: str = "") 
         orders = broker_client.get_orders(status=status_norm, limit=lim, symbols=syms)
         if orders is None:
             orders = []
+        try:
+            log_event("alpaca_cli_orders", level="info", source="alpaca_cli_fallback", status=status_norm, limit=lim, symbols=symbols or "all", count=len(orders) if isinstance(orders, list) else 0)
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli_fallback", "count": len(orders), "orders": orders, "status": status_norm, "limit": lim, "cli_error": cli.get("error")}, default=str)
     except Exception as e:
+        log_event("alpaca_cli_orders", level="warning", source="alpaca_cli_fallback", order_status=status_norm, error=str(e)[:200], status="error")
         return json.dumps({"source": "alpaca_cli_fallback", "error": str(e), "type": type(e).__name__, "cli_error": cli.get("error")}, default=str)
 
 
@@ -179,12 +211,21 @@ def alpaca_cli_clock() -> str:
         is_open = False
         if isinstance(data, dict):
             is_open = bool(data.get("is_open") or data.get("isOpen"))
+        try:
+            log_event("alpaca_cli_clock", level="info", source="alpaca_cli", is_open=is_open, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli", "is_open": is_open, "clock": data}, default=str)
     try:
         clock = broker_client.get_clock()
         is_open = bool(clock.get("is_open", False)) if isinstance(clock, dict) else False
+        try:
+            log_event("alpaca_cli_clock", level="info", source="alpaca_cli_fallback", is_open=is_open, status="ok")
+        except Exception:
+            pass
         return json.dumps({"source": "alpaca_cli_fallback", "is_open": is_open, "clock": clock, "cli_error": cli.get("error")}, default=str)
     except Exception as e:
+        log_event("alpaca_cli_clock", level="warning", source="alpaca_cli_fallback", error=str(e)[:200], status="error")
         return json.dumps({"source": "alpaca_cli_fallback", "error": str(e), "type": type(e).__name__, "cli_error": cli.get("error")}, default=str)
 
 
