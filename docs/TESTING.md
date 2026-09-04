@@ -6,6 +6,28 @@
 
 ---
 
+## Table of Contents
+
+- [1. Goals](#1-goals)
+- [2. Testing Layers](#2-layers)
+  - [2.1 Unit — Broker Integration](#21-unit--broker)
+  - [2.2 Unit — Risk Management Engine](#22-unit--risk)
+  - [2.3 Agent Output — Prompt Regression (DeepEval)](#23-agent-output--prompt-regression)
+  - [2.4 Prompt Comparison (Promptfoo)](#24-prompt-comparison)
+  - [2.5 Integration — Graph and CLI Wiring](#25-integration--graph-and-cli-wiring)
+  - [2.6 No-Mock + CLI/MCP Fallback Verification](#26-no-mock--climcp-fallback-phase-12-additions)
+- [3. Test Configuration](#3-configuration)
+  - [3.1 pytest Configuration](#31-pytest)
+  - [3.2 Coverage Strategy](#32-coverage)
+  - [3.3 Promptfoo Evaluation](#33-promptfoo)
+- [4. Fixtures and Mock Data](#4-fixtures-and-data)
+- [5. CI and Local Workflow](#5-ci-and-local-workflow)
+- [6. What Is Not Tested in v1](#6-what-is-not-tested-in-v1)
+- [7. References](#7-references)
+- [8. Related Documentation](#8-related-documentation)
+
+---
+
 ## 1. Goals
 
 - Protect the two places a silent bug costs paper money or disables safety: broker handling and risk enforcement.
@@ -137,6 +159,18 @@
 - `Backend_Architecture.md §14` and `§14.1`
 - `Agent_Architecture.md §10` and `§11`
 - `PHASES.md` Phases 13 through 15 for the testing, cleanup, and dry-run gates
+
+---
+
+## 8. Related Documentation
+
+- [Documentation Hub](./README.md) — Master map and guide for all documentation
+- [Test Suite Summary (Tests.md)](../Tests.md) — Fast-reference test catalog and fixture summary
+- [Backend Engine Guide](../backend/README.md) — Backend installation, engine structure, and CLI instructions
+- [Backend Architecture](./Backend_Architecture.md) — 7-layer architecture and evaluation specifications
+- [Agent Architecture](./Agent_Architecture.md) — Multi-agent LangGraph specifications and prompt testing
+- [API Reference](./API_REFERENCE.md) — REST endpoints (`/api/v1/*`) and 25 LangChain tools reference
+- [How To Use](./How_To_use.md) — Operational runbook, REPL commands, and autonomous scheduler
 
 ---
 

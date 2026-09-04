@@ -19,9 +19,6 @@ env/
 .mypy_cache/
 .ruff_cache/
 *.log
-venv/
-__pycache__
-*.pyc
 
 # --- Node / frontend ---
 node_modules/
@@ -49,7 +46,6 @@ backend/data/__pycache__/
 **/*.py[cod]
 **/*$py.class
 
-
 # --- Models / artifacts ---
 *.pkl
 *.joblib
@@ -73,16 +69,17 @@ Thumbs.db
 *paper_account*.json
 *_credentials.json
 
-#---- Docs ---
-# DOC.md and PHASES.md are tracked — do not ignore
-# DOC.md
-# PHASES.md
-
-# --- Phases ---
+# --- Docs (Root) ---
+DOC.md
+doc.md
 PHASES.md
+Phases.md
 Phase.md
+Tests.md
+Test.md
+tests.md
+
 # --- Testing / coverage ---
 .coverage
 htmlcov/
 .pytest_cache/
-

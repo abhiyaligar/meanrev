@@ -4,6 +4,20 @@
 
 ---
 
+## Table of Contents
+
+- [Single Command `meanrev` (Cheat Sheet)](#single-command-meanrev--like-claude--codex-copy-paste)
+- [1. Quick Start (Copy → Configure → Run)](#1-quick-start-copy--configure--run)
+- [2. CLI Flags Reference](#2-cli-flags--python--m-backendcli-flags)
+- [3. REPL — Slash Commands vs Natural Language](#3-repl--slash-vs-natural-language)
+- [4. Environment Configuration (`.env`)](#4-env-flags--single-source-via-backendenvexample--coreconfigpy)
+- [5. Broker REST API Surface (FastAPI)](#5-api--httplocalhost8000-fastapi)
+- [6. Typical Operational Flows](#6-typical-flows)
+- [7. Troubleshooting & FAQ](#7-troubleshooting)
+- [8. Related Documentation](#8-related-documentation)
+
+---
+
 ## Single Command `meanrev` — Like `claude` / `codex` (Copy-Paste)
 
 **Install once** (creates `meanrev` in `venv/Scripts/meanrev.exe` + wrappers `meanrev.bat`/`meanrev`):
@@ -239,5 +253,19 @@ venv/Scripts/python.exe -c "from backend.agents.reporting import reporting_agent
 | `source: mcp_fallback` + `mcp_not_configured` | Normal when `MCP_SERVER_URL` empty — fallback to broker works. Set `MCP_SERVER_URL=http://localhost:3000/sse` and run `npx @alpacahq/alpaca-mcp-server` for `source: mcp` |
 | `scheduler_skip_closed next_open 09:30` | Normal when market closed — scheduler waits till `09:30 ET` open, logs `scheduler_skip_closed` + persists `next_run`. Check `Get-Content backend\logs\scheduler.json` or `is_open` via `/api/v1/clock` |
 | `scheduler_skip_duplicate` | Normal when restarting within 5min — `logs/scheduler.json` `last_run` < `interval*0.8` ago, tick skipped for idempotence |
+
+---
+
+## 8. Related Documentation
+
+- [Documentation Hub](./README.md) — Master map and guide for all documentation
+- [Backend Engine Guide](../backend/README.md) — Backend installation, engine structure, and CLI instructions
+- [Agent Architecture](./Agent_Architecture.md) — Multi-agent LangGraph specifications and tool wiring
+- [Backend Architecture](./Backend_Architecture.md) — 7-layer architecture, tech stack, and state pipelines
+- [API Reference](./API_REFERENCE.md) — REST endpoints (`/api/v1/*`) and 25 LangChain tools reference
+- [Testing Strategy](./TESTING.md) — Test suites, coverage requirements, and verification procedures
+- [Product Requirements Document (PRD)](./PRD.md) — Hackathon goals, constraints, and scoring criteria
+
+---
 
 *All flags are single source via `backend/.env.example` → `backend/core/config.py` (`get_settings()`) → `backend/core/utils.get_model_id()` / `backend/core/system_prompt.get_system_prompt()`.*

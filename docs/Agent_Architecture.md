@@ -4,7 +4,37 @@
 **Scoring Window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Orchestration:** LangChain `create_agent` (built-in) + LangGraph `StateGraph` + `HumanInTheLoopMiddleware` + `ToolCallLimitMiddleware`  
 **Interface:** CLI only — no web frontend.  
-**Last Updated:** Phase 11 + `meanrev` single command — CLI `meanrev` via `pyproject.toml` + `meanrev.bat`/`meanrev` wrappers + `How_To_use.md` flag table; prior: Phase 9 Strategy `count_tokens<1000`, `options` guarantee, `ATR` sizing, `instruction` hook; Reporting deterministic + LLM; HITL `auto` vs `hitl`
+**Last Updated:** Phase 12b — Autonomous scheduler (`backend/scheduler/` APScheduler `IntervalTrigger` every 5m during market hours `09:30-16:00 ET`, `logs/scheduler.json` persistence) + 25 LangChain tools (4 read + 5 write/manage broker + 5 market + 3 news + 4 Alpaca CLI + 4 MCP) + `meanrev` single command CLI; prior: Phase 12 MCP/CLI integration (9 tools in research agent), Phase 9 Strategy ATR sizing & <1000 token limit.
+
+---
+
+## Table of Contents
+
+- [1. Purpose and Scope](#1-purpose-and-scope)
+- [2. Overall Agentic Workflow](#2-overall-agentic-workflow)
+- [3. Orchestration — LangChain and LangGraph](#3-orchestration--langchain-and-langgraph)
+  - [3.1 Graph Model](#31-graph-model)
+  - [3.2 Shared State](#32-shared-state)
+  - [3.3 System Prompt Discipline](#33-system-prompt-discipline)
+- [4. Agent Specifications](#4-agent-specifications)
+  - [4.1 Market Research Agent](#41-market-research-agent--llm_model_market_research-via-openrouter--groq--modal)
+  - [4.2 Strategy Agent](#42-strategy-agent--llm_model_strategy-via-openrouter--groq--modal)
+  - [4.3 Risk Management Agent](#43-risk-management-agent--deterministic-rules-engine-v1)
+  - [4.4 Execution Agent](#44-execution-agent--throttled-alpaca-client)
+  - [4.5 Reporting Agent](#45-reporting-agent--log-reader-and-summarizer-llm_model_reporting-via-same-gateway)
+- [5. Data Points and Feature Matrix](#5-data-points-and-feature-matrix)
+- [6. CLI Design](#6-cli-design)
+- [7. Broker and Data Support](#7-broker-and-data-support)
+- [8. Core Support — Configuration, Logging, Domain Models](#8-core-support--configuration-logging-domain-models)
+- [9. Execution Safeguards and Platform Risk](#9-execution-safeguards-and-platform-risk)
+  - [9.1 Safeguards](#91-safeguards)
+  - [9.2 Cash-Settled Index Options Settlement Lag](#92-cash-settled-index-options-settlement-lag)
+- [10. Evaluation](#10-evaluation)
+- [11. MCP Server and CLI Integration — Phase 12 Implemented](#11-mcp-server-and-cli-integration--phase-12-implemented)
+- [12. Deferred and v2 Extensions](#12-deferred-and-v2-extensions)
+- [13. Operational Requirements for Submission](#13-operational-requirements-for-submission)
+- [14. Decision Log](#14-decision-log)
+- [15. Related Documentation](#15-related-documentation)
 
 ---
 
@@ -313,6 +343,18 @@ Per hackathon requirements, every submission must use at least one of the Alpaca
 - **Dropped the dashboard.** The React and Tailwind frontend and the FastAPI backend service were removed after Alpaca clarified that a user interface is not required and that evaluation centers on the autonomous workflow and profit and loss.
 - **Deferred the ML risk surrogate.** The 100,000-path Monte Carlo plus XGBoost or LSTM estimator was replaced by enforceable deterministic thresholds for v1 to preserve reliability under the one-week build window.
 - **Chose CLI plus log plus reporting agent as the observability stack.** Live streaming to the terminal satisfies operational needs, the JSON-line log provides the audit trail, and the reporting agent produces the judging artifact. Together they replace a dashboard without losing evidence of reasoning.
+
+---
+
+## 15. Related Documentation
+
+- [Documentation Hub](./README.md) — Master map and guide for all documentation
+- [Backend Architecture](./Backend_Architecture.md) — 7-layer architecture, tech stack, and state pipelines
+- [API Reference](./API_REFERENCE.md) — REST endpoints (`/api/v1/*`) and 25 LangChain tools reference
+- [How To Use](./How_To_use.md) — Operational runbook, REPL commands, and autonomous scheduler
+- [Testing Strategy](./TESTING.md) — Test suites, coverage requirements, and verification procedures
+- [Product Requirements Document (PRD)](./PRD.md) — Hackathon goals, constraints, and scoring criteria
+- [Backend Engine Guide](../backend/README.md) — Backend installation, engine structure, and CLI instructions
 
 ---
 

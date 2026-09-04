@@ -7,6 +7,37 @@
 
 ---
 
+## Table of Contents
+
+- [1. Purpose and Scope](#1-purpose-and-scope)
+- [2. Architecture Principles](#2-architecture-principles)
+- [3. High-Level System Overview](#3-high-level-system-overview)
+- [4. Technology Stack](#4-technology-stack)
+- [5. Backend File Architecture — Target Structure](#5-backend-file-architecture--target-structure)
+- [6. Layer Responsibilities](#6-layer-responsibilities)
+  - [6.1 CLI Layer](#61-cli-layer)
+  - [6.2 Orchestration Layer](#62-orchestration-layer)
+  - [6.3 Agent Layer](#63-agent-layer)
+  - [6.4 Broker Layer](#64-broker-layer)
+  - [6.5 Data Layer](#65-data-layer)
+  - [6.6 Core Layer](#66-core-layer)
+- [7. Data Points and Feature Matrix](#7-data-points-and-feature-matrix)
+- [8. Configuration and Environment](#8-configuration-and-environment)
+- [9. Persistence and Caching Strategy](#9-persistence-and-caching-strategy)
+  - [9.1 Redis Configuration](#91-redis-configuration)
+- [10. Execution Safeguards](#10-execution-safeguards)
+- [11. Known Platform Risk — Cash-Settled Index Options Settlement Lag](#11-known-platform-risk--cash-settled-index-options-settlement-lag)
+- [12. Observability and Reporting](#12-observability-and-reporting)
+- [13. Security Considerations](#13-security-considerations)
+- [14. Evaluation and Quality Assurance](#14-evaluation-and-quality-assurance)
+  - [14.1 Testing Strategy](#141-testing-strategy)
+- [15. Deferred and v2 Extensions](#15-deferred-and-v2-extensions)
+- [16. Operational Requirements for Submission](#16-operational-requirements-for-submission)
+- [17. References](#17-references)
+- [18. Related Documentation](#18-related-documentation)
+
+---
+
 ## 1. Purpose and Scope
 
 This document describes the backend architecture that powers the autonomous trading system. The backend is responsible for orchestration of specialized agents, broker connectivity, data ingestion and indicator computation, risk enforcement, execution safeguards, logging and reporting, and CLI interaction.
@@ -256,6 +287,18 @@ For a hold-to-expiry approach this can mean the entire final day profit and loss
 - Alpaca Getting Started, Trading API, Python SDK, CLI, and MCP Server documentation
 - LabLab.ai hackathon page and Discord
 - Project living document DOC.md, which remains the authoritative source for evolving decisions
+
+---
+
+## 18. Related Documentation
+
+- [Documentation Hub](./README.md) — Master map and guide for all documentation
+- [Agent Architecture](./Agent_Architecture.md) — Multi-agent LangGraph specifications and tool wiring
+- [API Reference](./API_REFERENCE.md) — REST endpoints (`/api/v1/*`) and 25 LangChain tools reference
+- [How To Use](./How_To_use.md) — Operational runbook, REPL commands, and autonomous scheduler
+- [Testing Strategy](./TESTING.md) — Test suites, coverage requirements, and verification procedures
+- [Product Requirements Document (PRD)](./PRD.md) — Hackathon goals, constraints, and scoring criteria
+- [Backend Engine Guide](../backend/README.md) — Backend installation, engine structure, and CLI instructions
 
 ---
 

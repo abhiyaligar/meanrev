@@ -6,7 +6,44 @@
 **Official scoring window:** Mon Aug 31, 9:30 a.m. ET → Fri Sep 4, 9:30 a.m. ET  
 **Paper account starting balance for judging:** 100,000 dollars in a new dedicated paper account  
 **Evaluation focus:** Total equity change during the scoring window plus creativity, autonomy, and robustness of the agent workflow. Profit and loss matters but is not the sole factor. A user interface is not required per Alpaca.  
-**Last Updated:** Phase 12 — MCP Server + Alpaca CLI wired into research agent (TOOLS 12→21: `alpaca_cli_*` + `mcp_*` with broker fallback, `backend/mcp/` + `server_config.example.json`), no-mock `No data available...`; prior: Phase 11 `meanrev` single command, Phase 9 Strategy `count_tokens<1000` + options + ATR
+**Last Updated:** Phase 12b — Autonomous scheduler (`backend/scheduler/` ticker every 5m during market hours `09:30-16:00 ET`, `logs/scheduler.json` persistence) + 25 LangChain tools (4 read + 5 write/manage broker + 5 market + 3 news + 4 Alpaca CLI + 4 MCP) + `meanrev` single command CLI; prior: Phase 12 MCP/CLI integration (TOOLS 12→21), Phase 11 `meanrev` CLI, Phase 9 Strategy <1000 token limit.
+
+---
+
+## Table of Contents
+
+- [1. Executive Summary](#1-executive-summary)
+- [2. Goals and Non-Goals](#2-goals-and-non-goals)
+  - [2.1 Goals](#21-goals)
+  - [2.2 Non-Goals for v1](#22-non-goals-for-v1)
+- [3. Stakeholders and Personas](#3-stakeholders-and-personas)
+- [4. Hackathon Context and Constraints](#4-hackathon-context-and-constraints)
+- [5. Product Overview](#5-product-overview)
+- [6. Functional Requirements](#6-functional-requirements)
+  - [6.1 Autonomy and Orchestration](#61-autonomy-and-orchestration)
+  - [6.2 Market Research](#62-market-research)
+  - [6.3 Strategy Generation](#63-strategy-generation)
+  - [6.4 Risk Management](#64-risk-management)
+  - [6.5 Execution](#65-execution)
+  - [6.6 Reporting and Audit](#66-reporting-and-audit)
+  - [6.7 CLI](#67-cli)
+  - [6.8 Alpaca Integration Compliance](#68-alpaca-integration-compliance)
+  - [6.9 Evaluation Support](#69-evaluation-support)
+- [7. Non-Functional Requirements](#7-non-functional-requirements)
+- [8. System Architecture Summary](#8-system-architecture-summary)
+- [9. User Stories and Use Cases](#9-user-stories-and-use-cases)
+- [10. CLI Specification](#10-cli-specification)
+- [11. Risk, Safeguards, and Platform Awareness](#11-risk-safeguards-and-platform-awareness)
+- [12. Data and Model Specification](#12-data-and-model-specification)
+- [13. Submission and Compliance Checklist](#13-submission-and-compliance-checklist)
+- [14. Milestones and Timeline](#14-milestones-and-timeline)
+- [15. Success Metrics and Judging Alignment](#15-success-metrics-and-judging-alignment)
+- [16. Risks and Mitigations](#16-risks-and-mitigations)
+- [17. Deferred and v2 Roadmap](#17-deferred-and-v2-roadmap)
+- [18. Open Decisions](#18-open-decisions)
+- [19. References](#19-references)
+- [20. Document History](#20-document-history)
+- [21. Related Documentation](#21-related-documentation)
 
 ---
 
@@ -325,6 +362,18 @@ Profit and loss is necessary but not sufficient. Autonomy, robustness, and clari
 
 - This PRD consolidates and expands the material in DOC.md, which previously served as the combined architecture and specifications source.
 - Future edits to scope, thresholds, or agent responsibilities should update this PRD, DOC.md, and the two architecture documents together so that they remain consistent.
+
+---
+
+## 21. Related Documentation
+
+- [Documentation Hub](./README.md) — Master map and guide for all documentation
+- [Backend Architecture](./Backend_Architecture.md) — 7-layer architecture, tech stack, and state pipelines
+- [Agent Architecture](./Agent_Architecture.md) — Multi-agent LangGraph specifications and tool wiring
+- [API Reference](./API_REFERENCE.md) — REST endpoints (`/api/v1/*`) and 25 LangChain tools reference
+- [How To Use](./How_To_use.md) — Operational runbook, REPL commands, and autonomous scheduler
+- [Testing Strategy](./TESTING.md) — Test suites, coverage requirements, and verification procedures
+- [Backend Engine Guide](../backend/README.md) — Backend installation, engine structure, and CLI instructions
 
 ---
 

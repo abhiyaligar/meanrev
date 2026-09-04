@@ -10,9 +10,29 @@
 
 ---
 
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Active Endpoints](#2-active-endpoints)
+- [3. Schemas](#3-schemas)
+  - [3.1 GET /api/v1/account](#31-get-apiv1account--in-and-out)
+  - [3.2 GET /api/v1/positions](#32-get-apiv1positions--in-and-out)
+  - [3.3 GET /api/v1/orders](#33-get-apiv1orders--in-and-out)
+  - [3.4 GET /api/v1/clock](#34-get-apiv1clock--in-and-out)
+- [4. Error Catalog](#4-error-catalog)
+- [5. Rate Limiting and Retry](#5-rate-limiting-and-retry)
+- [6. cURL Examples](#6-curl-examples)
+- [7. File Map](#7-file-map)
+- [8. Tool Surface (25 LangChain Tools)](#8-tool-surface-langchain--phase-12-additions)
+- [8b. Reserved HTTP — Not Implemented in v1](#8b-reserved-http--not-implemented-in-v1)
+- [9. Platform Note — Cash-Settled Index Options Settlement Lag](#9-platform-note--cash-settled-index-options-settlement-lag)
+- [10. Related Documentation](#10-related-documentation)
+
+---
+
 ## 1. Overview
 
-v1 exposes a **read-only broker surface** that proxies Alpaca Trading API through a single throttled wrapper (`backend/broker/client.py`) plus LangChain tool surface (21 tools: 5 broker + 5 market + 3 news + 4 Alpaca CLI + 4 MCP). No write HTTP endpoints (`POST /orders`, `DELETE /orders`) are active in v1 to keep the scoring window safe — writes go via `broker_tools.submit_order` (HITL-protected) and `execution_agent` (`submit_order` throttled).
+v1 exposes a **read-only broker surface** that proxies Alpaca Trading API through a single throttled wrapper (`backend/broker/client.py`) plus LangChain tool surface (25 tools: 9 broker [4 read + 5 write/manage] + 5 market + 3 news + 4 Alpaca CLI + 4 MCP). No write HTTP endpoints (`POST /orders`, `DELETE /orders`) are active in v1 to keep the scoring window safe — writes go via `broker_tools.submit_order` (HITL-protected) and `execution_agent` (`submit_order` throttled).
 
 All responses are JSON with a `ts` ISO-8601 timestamp. Errors use a shared shape. Every call is logged as a JSON line to `backend/logs/broker.jsonl` (never secrets).
 
@@ -288,4 +308,15 @@ These remain empty until you explicitly approve a write surface. This keeps pape
 
 ---
 
-*Source of truth: DOC.md §5 backend file architecture, §7 safeguards, and the approved broker plan (25 req/min, backoff+jitter, paper-only). This doc updated from "No active endpoints" to active read surface after your approval.*
+## 10. Related Documentation
+
+- [Documentation Hub](./README.md) — Central map of all system documentation
+- [Backend Engine Guide](../backend/README.md) — Setup, directory structure, and engine operating modes
+- [Agent Architecture](./Agent_Architecture.md) — LangGraph agent specifications, prompt limits, and tool wiring
+- [Backend Architecture](./Backend_Architecture.md) — 7-layer architecture, tech stack, and state pipelines
+- [How To Use](./How_To_use.md) — Operational runbook, REPL commands, and autonomous scheduler
+- [Testing Strategy](./TESTING.md) — Test suites, coverage requirements, and verification procedures
+
+---
+
+*Source of truth: DOC.md §5 backend file architecture, §7 safeguards, and the approved broker plan (25 req/min, backoff+jitter, paper-only).*
